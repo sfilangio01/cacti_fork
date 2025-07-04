@@ -13,6 +13,7 @@ import {
   FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
   FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_2,
   FabricTestLedgerV1,
+  IFabricOrgEnvInfo, // Import IFabricOrgEnvInfo
 } from "@hyperledger/cactus-test-tooling";
 import { PluginKeychainMemory } from "@hyperledger/cactus-plugin-keychain-memory";
 import { PluginRegistry } from "@hyperledger/cactus-core";
@@ -25,13 +26,14 @@ import {
   FileBase64,
   ChainCodeProgrammingLanguage,
   RunTransactionResponse,
+  IPluginLedgerConnectorFabricOptions, // Used for connector options type
 } from "@hyperledger/cactus-plugin-ledger-connector-fabric";
 import { DiscoveryOptions, X509Identity } from "fabric-network";
 import { Config } from "node-ssh";
 import { randomUUID as uuidv4 } from "node:crypto";
 import fs from "fs-extra";
 import path from "path";
-import { expect } from "@jest/globals";
+import * as assert from "assert"; // Changed from Expect to assert
 import { ClaimFormat } from "../../../main/typescript/generated/proto/cacti/satp/v02/common/message_pb";
 import { Asset, NetworkId } from "../../../main/typescript";
 import { LedgerType } from "@hyperledger/cactus-core-api";
@@ -48,11 +50,31 @@ export interface IFabricTestEnvironment {
   claimFormat?: ClaimFormat;
   network?: string;
 }
+export interface IFabricConnectionConfig {
+  connectionProfileOrg1: ConnectionProfile;
+  connectionProfileOrg2: ConnectionProfile;
+  sshConfig: Config;
+  userIdentity: X509Identity;
+  bridgeIdentity: X509Identity;
+  fabricChannelName: string;
+  satpContractName: string;
+  clientId: string;
+  keychainEntryKeyBridge: string;
+  keychainEntryValueBridge: string;
+  fabricSigningCredential: FabricSigningCredential;
+  bridgeFabricSigningCredential: FabricSigningCredential;
+  claimFormat: ClaimFormat;
+  bridgeMSPID: string;
+  logLevel: LogLevelDesc;
+  networkId: NetworkId;
+}
+
 export class FabricTestEnvironment {
   public static readonly FABRIC_ASSET_ID: string = "FabricExampleAsset";
   public static readonly FABRIC_REFERENCE_ID: string = ExampleOntology.id;
   public static readonly FABRIC_NETWORK_ID: string = "FabricLedgerTestNetwork";
   public readonly network: NetworkId = {
+    // Reverted to original initialization
     id: FabricTestEnvironment.FABRIC_NETWORK_ID,
     ledgerType: LedgerType.Fabric2,
   };
@@ -66,7 +88,7 @@ export class FabricTestEnvironment {
   public keychainEntryValueBridge!: string;
   public fabricSigningCredential!: FabricSigningCredential;
   public bridgeFabricSigningCredential!: FabricSigningCredential;
-  public pluginRegistryBridge!: PluginRegistry;
+  public pluginRegistryBridge!: PluginRegistry; // Kept separate as per original logic
   public sshConfig!: Config;
   public discoveryOptions!: DiscoveryOptions;
   public configFabric!: Configuration;
@@ -80,6 +102,7 @@ export class FabricTestEnvironment {
   private dockerNetwork: string = "fabric";
 
   private readonly log: Logger;
+  private initialLogLevel: LogLevelDesc; // Stored for consistent logging level
 
   private bridgeMSPID?: string;
   public bridgeIdentity?: X509Identity;
@@ -90,6 +113,7 @@ export class FabricTestEnvironment {
     logLevel: LogLevelDesc,
     network?: string,
     claimFormat?: ClaimFormat,
+    existingConfig?: IFabricConnectionConfig, // Added for reconnection logic
   ) {
     if (network) {
       this.dockerNetwork = network;
@@ -98,128 +122,256 @@ export class FabricTestEnvironment {
 
     this.claimFormat = claimFormat || ClaimFormat.DEFAULT;
 
+    this.initialLogLevel = logLevel || "INFO"; // Store log level
     const level = logLevel || "INFO";
     const label = "FabricTestEnvironment";
     this.log = LoggerProvider.getOrCreate({ level, label });
+
+    // Handle reconnection vs. new setup
+    if (existingConfig) {
+      this.log.debug(
+        "FabricTestEnvironment: Reconnecting to existing environment.",
+      );
+      this.network = existingConfig.networkId;
+      this.connectionProfile = existingConfig.connectionProfileOrg1;
+      this.bridgeProfile = existingConfig.connectionProfileOrg2;
+      this.sshConfig = existingConfig.sshConfig;
+      this.userIdentity = existingConfig.userIdentity;
+      this.bridgeIdentity = existingConfig.bridgeIdentity;
+      this.fabricChannelName = existingConfig.fabricChannelName;
+      this.satpContractName = existingConfig.satpContractName;
+      this.clientId = existingConfig.clientId;
+      this.keychainEntryKeyBridge = existingConfig.keychainEntryKeyBridge;
+      this.keychainEntryValueBridge = existingConfig.keychainEntryValueBridge;
+      this.bridgeMSPID = existingConfig.bridgeMSPID;
+      this.claimFormat = existingConfig.claimFormat;
+      this.channelName = existingConfig.fabricChannelName;
+
+      // Recreate keychains using the stored keychainIds
+      const keychainPluginForConnector = new PluginKeychainMemory({
+        instanceId: existingConfig.fabricSigningCredential.keychainId, // Use original UUID
+        keychainId: existingConfig.fabricSigningCredential.keychainId, // Use original UUID
+        logLevel: this.initialLogLevel,
+        backend: new Map([
+          [
+            existingConfig.fabricSigningCredential.keychainRef,
+            JSON.stringify(existingConfig.userIdentity), // Use existing config's user identity
+          ],
+        ]),
+      });
+
+      this.keychainPluginBridge = new PluginKeychainMemory({
+        instanceId: existingConfig.bridgeFabricSigningCredential.keychainId, // Use original UUID
+        keychainId: existingConfig.bridgeFabricSigningCredential.keychainId, // Use original UUID
+        logLevel: this.initialLogLevel,
+        backend: new Map([
+          [
+            existingConfig.keychainEntryKeyBridge,
+            existingConfig.keychainEntryValueBridge,
+          ],
+        ]),
+      });
+
+      // Original behavior: main connector uses its own registry
+      const pluginRegistryMain = new PluginRegistry({
+        plugins: [keychainPluginForConnector],
+      });
+
+      // Original behavior: bridge leaf uses its own separate registry
+      this.pluginRegistryBridge = new PluginRegistry({
+        plugins: [this.keychainPluginBridge],
+      });
+
+      this.discoveryOptions = {
+        enabled: true,
+        asLocalhost: true,
+      };
+
+      const cliContainerEnvForConnector: IFabricOrgEnvInfo = {
+        ...FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
+      };
+      cliContainerEnvForConnector.CORE_CHAINCODE_BUILDER =
+        "hyperledger/fabric-nodeenv:2.5.4";
+
+      const connectorOptions: IPluginLedgerConnectorFabricOptions = {
+        instanceId: uuidv4(),
+        dockerBinary: "/usr/local/bin/docker",
+        peerBinary: "/fabric-samples/bin/peer",
+        goBinary: "/usr.local.go/bin/go",
+        pluginRegistry: pluginRegistryMain, // Use the main plugin registry
+        cliContainerEnv: cliContainerEnvForConnector,
+        sshConfig: this.sshConfig,
+        logLevel: this.initialLogLevel,
+        connectionProfile: this.connectionProfile,
+        discoveryOptions: this.discoveryOptions,
+        eventHandlerOptions: {
+          strategy: DefaultEventHandlerStrategy.NetworkScopeAllfortx,
+          commitTimeout: 300,
+        },
+      };
+      this.connector = new PluginLedgerConnectorFabric(connectorOptions);
+
+      this.fabricSigningCredential = existingConfig.fabricSigningCredential; // Use stored credentials directly
+      this.bridgeFabricSigningCredential =
+        existingConfig.bridgeFabricSigningCredential; // Use stored credentials directly
+    } else {
+      // Original logic for new setup, remains mostly the same
+      this.log.debug(
+        "FabricTestEnvironment: Initializing for new ledger setup (global setup phase).",
+      );
+      this.network = {
+        // Ensure network is initialized for new setups
+        id: FabricTestEnvironment.FABRIC_NETWORK_ID,
+        ledgerType: LedgerType.Fabric2,
+      };
+      // Set discoveryOptions for new setup
+      this.discoveryOptions = {
+        enabled: true,
+        asLocalhost: true,
+      };
+    }
   }
 
   // Initializes the Fabric ledger, accounts, and connector for testing
   public async init(logLevel: LogLevelDesc): Promise<void> {
-    this.ledger = new FabricTestLedgerV1({
-      emitContainerLogs: true,
-      publishAllPorts: true,
-      imageName: "ghcr.io/hyperledger/cactus-fabric2-all-in-one",
-      imageVersion: FABRIC_25_LTS_AIO_IMAGE_VERSION,
-      envVars: new Map([["FABRIC_VERSION", FABRIC_25_LTS_AIO_FABRIC_VERSION]]),
-      networkName: this.dockerNetwork,
-    });
+    // Only proceed if ledger is not already initialized (only for new setups)
+    if (!this.ledger) {
+      this.log.debug("FabricTestEnvironment: Initializing new Fabric ledger.");
+      this.ledger = new FabricTestLedgerV1({
+        emitContainerLogs: true,
+        publishAllPorts: true,
+        imageName: "ghcr.io/hyperledger/cactus-fabric2-all-in-one",
+        imageVersion: FABRIC_25_LTS_AIO_IMAGE_VERSION,
+        envVars: new Map([
+          ["FABRIC_VERSION", FABRIC_25_LTS_AIO_FABRIC_VERSION],
+        ]),
+        networkName: this.dockerNetwork,
+      });
 
-    const docker = new Docker();
+      const docker = new Docker();
 
-    const container = await this.ledger.start();
+      const container = await this.ledger.start();
 
-    const containerData = await docker
-      .getContainer((await container).id)
-      .inspect();
+      const containerData = await docker
+        .getContainer((await container).id)
+        .inspect();
 
-    this.dockerContainerIP =
-      containerData.NetworkSettings.Networks[
-        this.dockerNetwork || "bridge"
-      ].IPAddress;
+      this.dockerContainerIP =
+        containerData.NetworkSettings.Networks[
+          this.dockerNetwork || "bridge"
+        ].IPAddress;
 
-    this.fabricChannelName = "mychannel";
+      this.fabricChannelName = "mychannel";
 
-    this.connectionProfile = await this.ledger.getConnectionProfileOrgX("org1");
-    this.bridgeProfile = await this.ledger.getConnectionProfileOrgX("org2");
-    expect(this.connectionProfile).not.toBeUndefined();
-    expect(this.bridgeProfile).not.toBeUndefined();
+      this.connectionProfile =
+        await this.ledger.getConnectionProfileOrgX("org1");
+      this.bridgeProfile = await this.ledger.getConnectionProfileOrgX("org2");
+      assert.ok(
+        this.connectionProfile,
+        "Connection profile must not be undefined",
+      );
+      assert.ok(this.bridgeProfile, "Bridge profile must not be undefined");
 
-    const enrollAdminOut = await this.ledger.enrollAdmin();
-    const adminWallet = enrollAdminOut[1];
-    const enrollAdminBridgeOut = await this.ledger.enrollAdminV2({
-      organization: "org2",
-    });
-    const bridgeWallet = enrollAdminBridgeOut[1];
-    [this.userIdentity] = await this.ledger.enrollUser(adminWallet);
-    const opts = {
-      enrollmentID: "bridge",
-      organization: "org2",
-      wallet: bridgeWallet,
-    };
-    [this.bridgeIdentity] = await this.ledger.enrollUserV2(opts);
-    this.bridgeMSPID = this.bridgeIdentity!.mspId;
-    this.sshConfig = await this.ledger.getSshConfig();
+      const enrollAdminOut = await this.ledger.enrollAdmin();
+      const adminWallet = enrollAdminOut[1];
+      const enrollAdminBridgeOut = await this.ledger.enrollAdminV2({
+        organization: "org2",
+      });
+      const bridgeWallet = enrollAdminBridgeOut[1];
+      [this.userIdentity] = await this.ledger.enrollUser(adminWallet);
+      const opts = {
+        enrollmentID: "bridge",
+        organization: "org2",
+        wallet: bridgeWallet,
+      };
+      [this.bridgeIdentity] = await this.ledger.enrollUserV2(opts);
+      this.bridgeMSPID = this.bridgeIdentity!.mspId;
+      this.sshConfig = await this.ledger.getSshConfig();
 
-    this.log.debug("enrolled admin");
+      this.log.debug("enrolled admin");
 
-    const keychainInstanceId = uuidv4();
-    const keychainId = uuidv4();
-    const keychainEntryKey = "user1";
-    const keychainEntryValue = JSON.stringify(this.userIdentity);
+      const keychainInstanceId = uuidv4();
+      const keychainId = uuidv4(); // Unique ID for the user keychain
+      const keychainEntryKey = "user1";
+      const keychainEntryValue = JSON.stringify(this.userIdentity);
 
-    const keychainPlugin = new PluginKeychainMemory({
-      instanceId: keychainInstanceId,
-      keychainId,
-      logLevel,
-      backend: new Map([
-        [keychainEntryKey, keychainEntryValue],
-        ["some-other-entry-key", "some-other-entry-value"],
-      ]),
-    });
+      const keychainPlugin = new PluginKeychainMemory({
+        instanceId: keychainInstanceId,
+        keychainId,
+        logLevel,
+        backend: new Map([
+          [keychainEntryKey, keychainEntryValue],
+          ["some-other-entry-key", "some-other-entry-value"],
+        ]),
+      });
 
-    const pluginRegistry = new PluginRegistry({ plugins: [keychainPlugin] });
+      const pluginRegistryForConnector = new PluginRegistry({
+        plugins: [keychainPlugin],
+      }); // Main connector's registry
 
-    const keychainInstanceIdBridge = uuidv4();
-    const keychainIdBridge = uuidv4();
-    this.keychainEntryKeyBridge = "user2";
-    this.keychainEntryValueBridge = JSON.stringify(this.bridgeIdentity);
+      const keychainInstanceIdBridge = uuidv4();
+      const keychainIdBridge = uuidv4(); // Unique ID for the bridge keychain
+      this.keychainEntryKeyBridge = "user2"; // Original key name
+      this.keychainEntryValueBridge = JSON.stringify(this.bridgeIdentity);
 
-    this.keychainPluginBridge = new PluginKeychainMemory({
-      instanceId: keychainInstanceIdBridge,
-      keychainId: keychainIdBridge,
-      logLevel,
-      backend: new Map([
-        [this.keychainEntryKeyBridge, this.keychainEntryValueBridge],
-        ["some-other-entry-key", "some-other-entry-value"],
-      ]),
-    });
+      this.keychainPluginBridge = new PluginKeychainMemory({
+        instanceId: keychainInstanceIdBridge,
+        keychainId: keychainIdBridge,
+        logLevel,
+        backend: new Map([
+          [this.keychainEntryKeyBridge, this.keychainEntryValueBridge],
+          ["some-other-entry-key", "some-other-entry-value"],
+        ]),
+      });
 
-    this.pluginRegistryBridge = new PluginRegistry({
-      plugins: [this.keychainPluginBridge],
-    });
+      this.pluginRegistryBridge = new PluginRegistry({
+        // Separate registry for the bridge
+        plugins: [this.keychainPluginBridge],
+      });
 
-    this.discoveryOptions = {
-      enabled: true,
-      asLocalhost: true,
-    };
+      this.discoveryOptions = {
+        enabled: true,
+        asLocalhost: true,
+      };
 
-    const connectorOptions = {
-      instanceId: uuidv4(),
-      dockerBinary: "/usr/local/bin/docker",
-      peerBinary: "/fabric-samples/bin/peer",
-      goBinary: "/usr/local/go/bin/go",
-      pluginRegistry,
-      cliContainerEnv: FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
-      sshConfig: this.sshConfig,
-      logLevel,
-      connectionProfile: this.connectionProfile,
-      discoveryOptions: this.discoveryOptions,
-      eventHandlerOptions: {
-        strategy: DefaultEventHandlerStrategy.NetworkScopeAllfortx,
-        commitTimeout: 300,
-      },
-    };
+      const cliContainerEnvForConnector: IFabricOrgEnvInfo = {
+        ...FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
+      };
+      cliContainerEnvForConnector.CORE_CHAINCODE_BUILDER =
+        "hyperledger/fabric-nodeenv:2.5.4";
 
-    this.connector = new PluginLedgerConnectorFabric(connectorOptions);
+      const connectorOptions: IPluginLedgerConnectorFabricOptions = {
+        instanceId: uuidv4(),
+        dockerBinary: "/usr/local/bin/docker",
+        peerBinary: "/fabric-samples/bin/peer",
+        goBinary: "/usr.local.go/bin/go",
+        pluginRegistry: pluginRegistryForConnector, // This connector uses the main user's registry
+        cliContainerEnv: cliContainerEnvForConnector,
+        sshConfig: this.sshConfig,
+        logLevel,
+        connectionProfile: this.connectionProfile,
+        discoveryOptions: this.discoveryOptions,
+        eventHandlerOptions: {
+          strategy: DefaultEventHandlerStrategy.NetworkScopeAllfortx,
+          commitTimeout: 300,
+        },
+      };
 
-    this.fabricSigningCredential = {
-      keychainId,
-      keychainRef: keychainEntryKey,
-    };
-    this.bridgeFabricSigningCredential = {
-      keychainId: keychainIdBridge,
-      keychainRef: this.keychainEntryKeyBridge,
-    };
+      this.connector = new PluginLedgerConnectorFabric(connectorOptions);
+
+      this.fabricSigningCredential = {
+        keychainId, // Use the generated UUID
+        keychainRef: keychainEntryKey,
+      };
+      this.bridgeFabricSigningCredential = {
+        keychainId: keychainIdBridge, // Use the generated UUID
+        keychainRef: this.keychainEntryKeyBridge,
+      };
+    } else {
+      this.log.debug(
+        "FabricTestEnvironment: init() skipped, already connected.",
+      );
+    }
   }
 
   public getTestContractName(): string {
@@ -254,7 +406,6 @@ export class FabricTestEnvironment {
   }
 
   // Creates and initializes a new FabricTestEnvironment instance
-
   public static async setupTestEnvironment(
     config: IFabricTestEnvironment,
   ): Promise<FabricTestEnvironment> {
@@ -269,8 +420,30 @@ export class FabricTestEnvironment {
     return instance;
   }
 
+  // Connects to an existing FabricTestEnvironment instance
+  public static async connectToExistingEnvironment(
+    config: IFabricConnectionConfig,
+  ): Promise<FabricTestEnvironment> {
+    const instance = new FabricTestEnvironment(
+      config.satpContractName,
+      config.logLevel,
+      undefined, // No network name needed for connecting
+      config.claimFormat,
+      config, // Pass the full connection config
+    );
+    // The constructor's `if (existingConfig)` block handles re-initialization.
+    return instance;
+  }
+
   // this is the config to be loaded by the gateway, does not contain the log level because it will use the one in the gateway config
   public createFabricConfig(): INetworkOptions {
+    // Recreate the specific `cliContainerEnv` for this config as per original
+    const cliContainerEnvForConfig: IFabricOrgEnvInfo = {
+      ...FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
+    };
+    cliContainerEnvForConfig.CORE_CHAINCODE_BUILDER =
+      "hyperledger/fabric-nodeenv:2.5.4";
+
     return {
       networkIdentification: this.network,
       userIdentity: this.bridgeIdentity,
@@ -289,8 +462,8 @@ export class FabricTestEnvironment {
       connectorOptions: {
         dockerBinary: "/usr/local/bin/docker",
         peerBinary: "/fabric-samples/bin/peer",
-        goBinary: "/usr/local/go/bin/go",
-        cliContainerEnv: FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
+        goBinary: "/usr.local.go/bin/go",
+        cliContainerEnv: cliContainerEnvForConfig, // Use the locally modified copy
         sshConfig: this.sshConfig,
         connectionProfile: this.bridgeProfile,
         discoveryOptions: {
@@ -308,6 +481,21 @@ export class FabricTestEnvironment {
 
   // this is the config to be loaded by the gateway, does not contain the log level because it will use the one in the gateway config
   public async createFabricDockerConfig(): Promise<INetworkOptions> {
+    // Use the stored sshConfig and bridgeProfile if not starting a new ledger
+    const sshConfig = this.ledger
+      ? await this.ledger.getSshConfig(false)
+      : this.sshConfig;
+    const connectionProfile = this.ledger
+      ? await this.ledger.getConnectionProfileOrgX("org2", false)
+      : this.bridgeProfile;
+
+    // Recreate the specific `cliContainerEnv` for this config as per original
+    const cliContainerEnvForConfig: IFabricOrgEnvInfo = {
+      ...FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
+    };
+    cliContainerEnvForConfig.CORE_CHAINCODE_BUILDER =
+      "hyperledger/fabric-nodeenv:2.5.4";
+
     return {
       networkIdentification: this.network,
       userIdentity: this.bridgeIdentity,
@@ -326,13 +514,10 @@ export class FabricTestEnvironment {
       connectorOptions: {
         dockerBinary: "/usr/local/bin/docker",
         peerBinary: "/fabric-samples/bin/peer",
-        goBinary: "/usr/local/go/bin/go",
-        cliContainerEnv: FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
-        sshConfig: await this.ledger.getSshConfig(false),
-        connectionProfile: await this.ledger.getConnectionProfileOrgX(
-          "org2",
-          false,
-        ),
+        goBinary: "/usr.local.go/bin/go",
+        cliContainerEnv: cliContainerEnvForConfig, // Use the locally modified copy
+        sshConfig: sshConfig,
+        connectionProfile: connectionProfile,
         discoveryOptions: {
           enabled: true,
           asLocalhost: false,
@@ -350,6 +535,13 @@ export class FabricTestEnvironment {
     ontologyManager: OntologyManager,
     logLevel?: LogLevelDesc,
   ): IFabricLeafOptions {
+    // Recreate the specific `cliContainerEnv` for this config as per original
+    const cliContainerEnvForConfig: IFabricOrgEnvInfo = {
+      ...FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
+    };
+    cliContainerEnvForConfig.CORE_CHAINCODE_BUILDER =
+      "hyperledger/fabric-nodeenv:2.5.4";
+
     return {
       networkIdentification: this.network,
       signingCredential: this.bridgeFabricSigningCredential,
@@ -370,9 +562,9 @@ export class FabricTestEnvironment {
         instanceId: uuidv4(),
         dockerBinary: "/usr/local/bin/docker",
         peerBinary: "/fabric-samples/bin/peer",
-        goBinary: "/usr/local/go/bin/go",
-        pluginRegistry: this.pluginRegistryBridge,
-        cliContainerEnv: FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
+        goBinary: "/usr.local.go/bin/go",
+        pluginRegistry: this.pluginRegistryBridge, // Crucial: This uses the SEPARATE bridge registry
+        cliContainerEnv: cliContainerEnvForConfig,
         sshConfig: this.sshConfig,
         logLevel: logLevel,
         connectionProfile: this.bridgeProfile,
@@ -406,8 +598,13 @@ export class FabricTestEnvironment {
       signingCredential: signingCredential,
     });
 
-    expect(responseBalance1).not.toBeUndefined();
-    expect(responseBalance1.functionOutput).toBe(amount);
+    assert.ok(responseBalance1, "Response balance must not be undefined"); // Changed from expect().not.toBeUndefined()
+    assert.strictEqual(
+      // Changed from expect().toBe()
+      responseBalance1.functionOutput,
+      amount,
+      `Balance mismatch: expected ${amount}, got ${responseBalance1.functionOutput}`,
+    );
   }
 
   public async giveRoleToBridge(mspID: string): Promise<void> {
@@ -417,10 +614,10 @@ export class FabricTestEnvironment {
       params: [mspID],
       methodName: "setBridge",
       invocationType: FabricContractInvocationType.Send,
-      signingCredential: this.fabricSigningCredential,
+      signingCredential: this.fabricSigningCredential, // Original: Uses main user's credential
     });
 
-    expect(setBridgeResponse).not.toBeUndefined();
+    assert.ok(setBridgeResponse, "Set bridge response must not be undefined"); // Changed from expect().not.toBeUndefined()
 
     this.log.info(
       `SATPWrapper.setBridge(): ${JSON.stringify(setBridgeResponse)}`,
@@ -440,7 +637,7 @@ export class FabricTestEnvironment {
       signingCredential: this.fabricSigningCredential,
     });
 
-    expect(response).not.toBeUndefined();
+    assert.ok(response, "Approve response must not be undefined"); // Changed from expect().not.toBeUndefined()
 
     this.log.info(`SATPWrapper.Approve(): ${JSON.stringify(response)}`);
   }
@@ -561,8 +758,8 @@ export class FabricTestEnvironment {
     });
 
     const { packageIds, lifecycle, success } = res;
-    expect(success).toBe(true);
-    expect(lifecycle).not.toBeUndefined();
+    assert.ok(success, "Deployment success expected to be true"); // Changed from expect().toBe(true)
+    assert.ok(lifecycle, "Lifecycle must not be undefined"); // Changed from expect().not.toBeUndefined()
 
     const {
       approveForMyOrgList,
@@ -573,20 +770,26 @@ export class FabricTestEnvironment {
       queryCommitted,
     } = lifecycle;
 
-    expect(packageIds).toBeTruthy();
-    expect(Array.isArray(packageIds)).toBe(true);
+    assert.ok(packageIds, "Package IDs must be truthy"); // Changed from expect().toBeTruthy()
+    assert.ok(Array.isArray(packageIds), "Package IDs must be an array"); // Changed from expect().toBe(true)
 
-    expect(approveForMyOrgList).toBeTruthy();
-    expect(Array.isArray(approveForMyOrgList)).toBe(true);
+    assert.ok(approveForMyOrgList, "Approve for my Org List must be truthy");
+    assert.ok(
+      Array.isArray(approveForMyOrgList),
+      "Approve for my Org List must be an array",
+    );
 
-    expect(installList).toBeTruthy();
-    expect(Array.isArray(installList)).toBe(true);
-    expect(queryInstalledList).toBeTruthy();
-    expect(Array.isArray(queryInstalledList)).toBe(true);
+    assert.ok(installList, "Install list must be truthy");
+    assert.ok(Array.isArray(installList), "Install list must be an array");
+    assert.ok(queryInstalledList, "Query installed list must be truthy");
+    assert.ok(
+      Array.isArray(queryInstalledList),
+      "Query installed list must be an array",
+    );
 
-    expect(commit).toBeTruthy();
-    expect(packaging).toBeTruthy();
-    expect(queryCommitted).toBeTruthy();
+    assert.ok(commit, "Commit must be truthy");
+    assert.ok(packaging, "Packaging must be truthy");
+    assert.ok(queryCommitted, "Query committed must be truthy");
     this.log.info("SATP Contract deployed");
 
     const initializeResponse = await this.connector.transact({
@@ -598,7 +801,7 @@ export class FabricTestEnvironment {
       signingCredential: this.fabricSigningCredential,
     });
 
-    expect(initializeResponse).not.toBeUndefined();
+    assert.ok(initializeResponse, "Initialize response must not be undefined"); // Changed from expect().not.toBeUndefined()
 
     this.log.info(
       `SATPContract.InitToken(): ${JSON.stringify(initializeResponse)}`,
@@ -713,8 +916,8 @@ export class FabricTestEnvironment {
     });
 
     const { packageIds, lifecycle, success } = res;
-    expect(success).toBe(true);
-    expect(lifecycle).not.toBeUndefined();
+    assert.ok(success, "Deployment success expected to be true");
+    assert.ok(lifecycle, "Lifecycle must not be undefined");
 
     const {
       approveForMyOrgList,
@@ -725,20 +928,26 @@ export class FabricTestEnvironment {
       queryCommitted,
     } = lifecycle;
 
-    expect(packageIds).toBeTruthy();
-    expect(Array.isArray(packageIds)).toBe(true);
+    assert.ok(packageIds, "Package IDs must be truthy");
+    assert.ok(Array.isArray(packageIds), "Package IDs must be an array");
 
-    expect(approveForMyOrgList).toBeTruthy();
-    expect(Array.isArray(approveForMyOrgList)).toBe(true);
+    assert.ok(approveForMyOrgList, "Approve for my Org List must be truthy");
+    assert.ok(
+      Array.isArray(approveForMyOrgList),
+      "Approve for my Org List must be an array",
+    );
 
-    expect(installList).toBeTruthy();
-    expect(Array.isArray(installList)).toBe(true);
-    expect(queryInstalledList).toBeTruthy();
-    expect(Array.isArray(queryInstalledList)).toBe(true);
+    assert.ok(installList, "Install list must be truthy");
+    assert.ok(Array.isArray(installList), "Install list must be an array");
+    assert.ok(queryInstalledList, "Query installed list must be truthy");
+    assert.ok(
+      Array.isArray(queryInstalledList),
+      "Query installed list must be an array",
+    );
 
-    expect(commit).toBeTruthy();
-    expect(packaging).toBeTruthy();
-    expect(queryCommitted).toBeTruthy();
+    assert.ok(commit, "Commit must be truthy");
+    assert.ok(packaging, "Packaging must be truthy");
+    assert.ok(queryCommitted, "Query committed must be truthy");
     this.log.info("Oracle Business Logic Contract deployed");
 
     const initializeResponse = await this.connector.transact({
@@ -750,7 +959,7 @@ export class FabricTestEnvironment {
       signingCredential: this.fabricSigningCredential,
     });
 
-    expect(initializeResponse).not.toBeUndefined();
+    assert.ok(initializeResponse, "Initialize response must not be undefined");
 
     this.log.info(
       `OracleBLContract.InitLedger(): ${JSON.stringify(initializeResponse)}`,
@@ -774,7 +983,7 @@ export class FabricTestEnvironment {
       invocationType: FabricContractInvocationType.Send,
       signingCredential: this.fabricSigningCredential,
     });
-    expect(readData).not.toBeUndefined();
+    assert.ok(readData, "Read data response must not be undefined");
 
     return readData;
   }
@@ -792,7 +1001,7 @@ export class FabricTestEnvironment {
       invocationType: FabricContractInvocationType.Call,
       signingCredential: this.fabricSigningCredential,
     });
-    expect(readData).not.toBeUndefined();
+    assert.ok(readData, "Read data response must not be undefined");
 
     return readData;
   }
@@ -806,7 +1015,7 @@ export class FabricTestEnvironment {
       invocationType: FabricContractInvocationType.Send,
       signingCredential: this.fabricSigningCredential,
     });
-    expect(responseMint).not.toBeUndefined();
+    assert.ok(responseMint, "Mint response must not be undefined");
 
     this.log.info(
       `Mint 100 amount asset by the owner response: ${JSON.stringify(responseMint)}`,
@@ -838,7 +1047,14 @@ export class FabricTestEnvironment {
 
   // Stops and destroys the test ledger
   public async tearDown(): Promise<void> {
-    await this.ledger.stop();
-    await this.ledger.destroy();
+    if (this.ledger) {
+      // Only tear down if this instance started the ledger
+      await this.ledger.stop();
+      await this.ledger.destroy();
+    } else {
+      this.log.warn(
+        "Fabric ledger instance not found. Skipping tearDown (likely connected to existing).",
+      );
+    }
   }
 }

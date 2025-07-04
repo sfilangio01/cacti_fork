@@ -18,7 +18,7 @@ import Web3 from "web3";
 import { PluginKeychainMemory } from "@hyperledger/cactus-plugin-keychain-memory";
 import { PluginRegistry } from "@hyperledger/cactus-core";
 import { randomUUID as uuidv4 } from "node:crypto";
-import { expect } from "@jest/globals";
+import * as assert from "assert";
 import { ClaimFormat } from "../../../main/typescript/generated/proto/cacti/satp/v02/common/message_pb";
 import { Asset, AssetTokenTypeEnum, NetworkId } from "../../../main/typescript";
 import { LedgerType } from "@hyperledger/cactus-core-api";
@@ -30,11 +30,29 @@ import { OntologyManager } from "../../../main/typescript/cross-chain-mechanisms
 import ExampleOntology from "../../ontologies/ontology-satp-erc20-interact-besu.json";
 import { INetworkOptions } from "../../../main/typescript/cross-chain-mechanisms/bridge/bridge-types";
 import Docker from "dockerode";
+// Test environment for Besu ledger operations
+
+export interface IBesuConnectionConfig {
+  rpcApiHttpHost: string;
+  rpcApiWsHost: string;
+  firstHighNetWorthAccount: string;
+  bridgeEthAccount: { address: string; privateKey: string };
+  assigneeEthAccount: { address: string; privateKey: string };
+  besuKeyPair: { privateKey: string };
+  keychainEntryKey: string;
+  keychainEntryValue: string;
+  erc20TokenContract: string;
+  assetContractAddress?: string;
+  networkId: NetworkId;
+  logLevel: LogLevelDesc;
+}
+
 export interface IBesuTestEnvironment {
   contractName: string;
   logLevel: LogLevelDesc;
   network?: string;
 }
+
 export class BesuTestEnvironment {
   public static readonly BESU_ASSET_ID: string = "BesuExampleAsset";
   public static readonly BESU_REFERENCE_ID: string = ExampleOntology.id;
@@ -69,6 +87,7 @@ export class BesuTestEnvironment {
     erc20TokenContract: string,
     logLevel: LogLevelDesc,
     network?: string,
+    existingConfig?: IBesuConnectionConfig, // Added for reconnection logic
   ) {
     if (network) {
       this.dockerNetwork = network;
@@ -79,114 +98,203 @@ export class BesuTestEnvironment {
     const level = logLevel || "INFO";
     const label = "BesuTestEnvironment";
     this.log = LoggerProvider.getOrCreate({ level, label });
+
+    // Populate properties if connecting to existing ledger (new logic for shared setup)
+    if (existingConfig) {
+      this.network = existingConfig.networkId;
+      this.firstHighNetWorthAccount = existingConfig.firstHighNetWorthAccount;
+      this.bridgeEthAccount = existingConfig.bridgeEthAccount;
+      this.assigneeEthAccount = existingConfig.assigneeEthAccount;
+      this.besuKeyPair = existingConfig.besuKeyPair;
+      this.keychainEntryKey = existingConfig.keychainEntryKey;
+      this.keychainEntryValue = existingConfig.keychainEntryValue;
+      this.erc20TokenContract = existingConfig.erc20TokenContract;
+      this.assetContractAddress = existingConfig.assetContractAddress;
+
+      // Re-initialize Web3 and Connector for the existing ledger
+      this.web3 = new Web3(existingConfig.rpcApiHttpHost);
+
+      this.keychainPlugin1 = new PluginKeychainMemory({
+        instanceId: uuidv4(), // Need new unique instanceId for this specific plugin instance
+        keychainId: uuidv4(), // Need new unique keychainId for this specific keychain
+        backend: new Map([[this.keychainEntryKey, this.keychainEntryValue]]),
+        logLevel,
+      });
+
+      this.keychainPlugin2 = new PluginKeychainMemory({
+        instanceId: uuidv4(), // Need new unique instanceId for this specific plugin instance
+        keychainId: uuidv4(), // Need new unique keychainId for this specific keychain
+        backend: new Map([[this.keychainEntryKey, this.keychainEntryValue]]),
+        logLevel,
+      });
+
+      // Smart Contract Configuration - initial setup for known contract
+      // Note: For dynamic contracts, this will be set in deployAndSetupContracts
+      this.keychainPlugin1.set(
+        this.erc20TokenContract,
+        JSON.stringify(SATPTokenContract),
+      );
+
+      // Plugin Registry setup
+      const pluginRegistry = new PluginRegistry({
+        plugins: [this.keychainPlugin1, this.keychainPlugin2],
+      });
+
+      // Besu Connector setup
+      this.connectorOptions = {
+        instanceId: uuidv4(),
+        rpcApiHttpHost: existingConfig.rpcApiHttpHost,
+        rpcApiWsHost: existingConfig.rpcApiWsHost,
+        pluginRegistry,
+        logLevel,
+      };
+
+      this.connector = new PluginLedgerConnectorBesu(this.connectorOptions);
+
+      // Initialize besuConfig for leaf options if needed
+      this.besuConfig = {
+        networkIdentification: this.network,
+        signingCredential: {
+          ethAccount: this.bridgeEthAccount.address,
+          secret: this.bridgeEthAccount.privateKey,
+          type: Web3SigningCredentialTypeBesu.PrivateKeyHex,
+        },
+        leafId: "Testing-event-besu-leaf",
+        connectorOptions: this.connectorOptions,
+        claimFormats: [],
+        gas: this.gas,
+      };
+    } else {
+      // Original logic for new setup (used in global-setup), remains untouched
+    }
   }
 
-  // Initializes the Besu ledger, accounts, and connector for testing
+  // Initializes the Besu ledger, accounts, and connector for testing (ONLY CALLED ONCE IN GLOBAL SETUP)
   public async init(logLevel: LogLevelDesc): Promise<void> {
-    this.ledger = new BesuTestLedger({
-      emitContainerLogs: true,
-      envVars: ["BESU_NETWORK=dev"],
-      containerImageVersion: "2024-06-09-cc2f9c5",
-      containerImageName: "ghcr.io/hyperledger/cactus-besu-all-in-one",
-      networkName: this.dockerNetwork,
-    });
+    // Only proceed if ledger is not already initialized (only for new setups)
+    if (!this.ledger) {
+      this.ledger = new BesuTestLedger({
+        emitContainerLogs: true,
+        envVars: ["BESU_NETWORK=dev"],
+        containerImageVersion: "2024-06-09-cc2f9c5",
+        containerImageName: "ghcr.io/hyperledger/cactus-besu-all-in-one",
+        networkName: this.dockerNetwork,
+      });
 
-    const docker = new Docker();
+      const docker = new Docker();
 
-    const container = await this.ledger.start(false);
+      const container = await this.ledger.start(false);
 
-    const containerData = await docker
-      .getContainer((await container).id)
-      .inspect();
+      const containerData = await docker
+        .getContainer((await container).id)
+        .inspect();
 
-    this.dockerContainerIP =
-      containerData.NetworkSettings.Networks[
-        this.dockerNetwork || "bridge"
-      ].IPAddress;
+      this.dockerContainerIP =
+        containerData.NetworkSettings.Networks[
+          this.dockerNetwork || "bridge"
+        ].IPAddress;
 
-    const rpcApiHttpHost = await this.ledger.getRpcApiHttpHost();
+      const rpcApiHttpHost = await this.ledger.getRpcApiHttpHost();
+      const rpcApiWsHost = await this.ledger.getRpcApiWsHost();
 
-    const rpcApiWsHost = await this.ledger.getRpcApiWsHost();
+      this.web3 = new Web3(rpcApiHttpHost);
 
-    this.web3 = new Web3(rpcApiHttpHost);
+      // Accounts setup
+      this.firstHighNetWorthAccount = this.ledger.getGenesisAccountPubKey();
+      this.bridgeEthAccount = await this.ledger.createEthTestAccount();
+      this.assigneeEthAccount = await this.ledger.createEthTestAccount();
 
-    // Accounts setup
-    this.firstHighNetWorthAccount = this.ledger.getGenesisAccountPubKey();
-    this.bridgeEthAccount = await this.ledger.createEthTestAccount();
-    this.assigneeEthAccount = await this.ledger.createEthTestAccount();
+      // Besu Key Pair setup
+      this.besuKeyPair = { privateKey: this.ledger.getGenesisAccountPrivKey() };
+      this.keychainEntryValue = this.besuKeyPair.privateKey;
+      this.keychainEntryKey = uuidv4();
 
-    // Besu Key Pair setup
-    this.besuKeyPair = { privateKey: this.ledger.getGenesisAccountPrivKey() };
-    this.keychainEntryValue = this.besuKeyPair.privateKey;
-    this.keychainEntryKey = uuidv4();
+      // Keychain Plugins setup
+      this.keychainPlugin1 = new PluginKeychainMemory({
+        instanceId: uuidv4(),
+        keychainId: uuidv4(),
+        backend: new Map([[this.keychainEntryKey, this.keychainEntryValue]]),
+        logLevel,
+      });
 
-    // Keychain Plugins setup
-    this.keychainPlugin1 = new PluginKeychainMemory({
-      instanceId: uuidv4(),
-      keychainId: uuidv4(),
-      backend: new Map([[this.keychainEntryKey, this.keychainEntryValue]]),
-      logLevel,
-    });
+      this.keychainPlugin2 = new PluginKeychainMemory({
+        instanceId: uuidv4(),
+        keychainId: uuidv4(),
+        backend: new Map([[this.keychainEntryKey, this.keychainEntryValue]]),
+        logLevel,
+      });
 
-    this.keychainPlugin2 = new PluginKeychainMemory({
-      instanceId: uuidv4(),
-      keychainId: uuidv4(),
-      backend: new Map([[this.keychainEntryKey, this.keychainEntryValue]]),
-      logLevel,
-    });
+      // Smart Contract Configuration - initial setup for known contract
+      // Note: For dynamic contracts, this will be set in deployAndSetupContracts
+      this.keychainPlugin1.set(
+        this.erc20TokenContract,
+        JSON.stringify(SATPTokenContract),
+      );
 
-    // Smart Contract Configuration
-    this.keychainPlugin1.set(
-      this.erc20TokenContract,
-      JSON.stringify(SATPTokenContract),
-    );
+      // Plugin Registry setup
+      const pluginRegistry = new PluginRegistry({
+        plugins: [this.keychainPlugin1, this.keychainPlugin2],
+      });
 
-    // Plugin Registry setup
-    const pluginRegistry = new PluginRegistry({
-      plugins: [this.keychainPlugin1, this.keychainPlugin2],
-    });
+      // Besu Connector setup
+      this.connectorOptions = {
+        instanceId: uuidv4(),
+        rpcApiHttpHost,
+        rpcApiWsHost,
+        pluginRegistry,
+        logLevel,
+      };
 
-    // Besu Connector setup
-    this.connectorOptions = {
-      instanceId: uuidv4(),
-      rpcApiHttpHost,
-      rpcApiWsHost,
-      pluginRegistry,
-      logLevel,
-    };
+      this.connector = new PluginLedgerConnectorBesu(this.connectorOptions);
 
-    this.connector = new PluginLedgerConnectorBesu(this.connectorOptions);
+      // Fund the bridge account (initial funding, can be done once globally)
+      await this.connector.transact({
+        web3SigningCredential: {
+          ethAccount: this.firstHighNetWorthAccount,
+          secret: this.besuKeyPair.privateKey,
+          type: Web3SigningCredentialTypeBesu.PrivateKeyHex,
+        },
+        consistencyStrategy: {
+          blockConfirmations: 0,
+          receiptType: ReceiptType.NodeTxPoolAck,
+        },
+        transactionConfig: {
+          from: this.firstHighNetWorthAccount,
+          to: this.bridgeEthAccount.address,
+          value: 10e9,
+          gas: 1000000,
+        },
+      });
 
-    await this.connector.transact({
-      web3SigningCredential: {
-        ethAccount: this.firstHighNetWorthAccount,
-        secret: this.besuKeyPair.privateKey,
-        type: Web3SigningCredentialTypeBesu.PrivateKeyHex,
-      },
-      consistencyStrategy: {
-        blockConfirmations: 0,
-        receiptType: ReceiptType.NodeTxPoolAck,
-      },
-      transactionConfig: {
-        from: this.firstHighNetWorthAccount,
-        to: this.bridgeEthAccount.address,
-        value: 10e9,
-        gas: 1000000,
-      },
-    });
+      const balance = await this.web3.eth.getBalance(
+        this.bridgeEthAccount.address,
+      );
+      assert.ok(balance, "Balance should be truthy");
+      assert.ok(
+        parseInt(balance.toString(), 10) > 10e9,
+        `Bridge account balance (${balance}) should be greater than 10e9`,
+      );
+      this.log.info(`Bridge account funded: New Balance: ${balance} wei`);
 
-    const balance = await this.web3.eth.getBalance(
-      this.bridgeEthAccount.address,
-    );
-    expect(balance).toBeTruthy();
-    expect(parseInt(balance.toString(), 10)).toBeGreaterThan(10e9);
-    this.log.info(`Bridge account funded: New Balance: ${balance} wei`);
+      // Initialize besuConfig for leaf options if needed
+      this.besuConfig = {
+        networkIdentification: this.network,
+        signingCredential: {
+          ethAccount: this.bridgeEthAccount.address,
+          secret: this.bridgeEthAccount.privateKey,
+          type: Web3SigningCredentialTypeBesu.PrivateKeyHex,
+        },
+        leafId: "Testing-event-besu-leaf",
+        connectorOptions: this.connectorOptions,
+        claimFormats: [],
+        gas: this.gas,
+      };
+    } else {
+      this.log.warn("Besu init() skipped, ledger already initialized.");
+    }
   }
 
   // Creates and initializes a new BesuTestEnvironment instance
-
-  // Other methods and properties...
-
   public static async setupTestEnvironment(
     config: IBesuTestEnvironment,
   ): Promise<BesuTestEnvironment> {
@@ -196,6 +304,19 @@ export class BesuTestEnvironment {
       config.network,
     );
     await instance.init(config.logLevel);
+    return instance;
+  }
+
+  // NEW: Static method to connect to an existing BesuTestLedger
+  public static async connectToExistingEnvironment(
+    config: IBesuConnectionConfig,
+  ): Promise<BesuTestEnvironment> {
+    const instance = new BesuTestEnvironment(
+      config.erc20TokenContract,
+      config.logLevel,
+      undefined, // No network name needed for connecting
+      config, // Pass the full connection config
+    );
     return instance;
   }
 
@@ -215,8 +336,14 @@ export class BesuTestEnvironment {
     } as INetworkOptions;
   }
 
-  // this is the config to be loaded by the gateway when in a docker, does not contain the log level because it will use the one in the gateway config
   public async createBesuDockerConfig(): Promise<INetworkOptions> {
+    const rpcApiHttpHost = this.ledger
+      ? await this.ledger.getRpcApiHttpHost(false)
+      : this.connectorOptions.rpcApiHttpHost;
+    const rpcApiWsHost = this.ledger
+      ? await this.ledger.getRpcApiWsHost(false)
+      : this.connectorOptions.rpcApiWsHost;
+
     return {
       networkIdentification: this.besuConfig.networkIdentification,
       signingCredential: this.besuConfig.signingCredential,
@@ -224,8 +351,8 @@ export class BesuTestEnvironment {
       wrapperContractAddress: this.besuConfig.wrapperContractAddress,
       gas: this.besuConfig.gas,
       connectorOptions: {
-        rpcApiHttpHost: await this.ledger.getRpcApiHttpHost(false),
-        rpcApiWsHost: await this.ledger.getRpcApiWsHost(false),
+        rpcApiHttpHost,
+        rpcApiWsHost,
       },
       claimFormats: this.besuConfig.claimFormats,
     } as INetworkOptions;
@@ -264,10 +391,19 @@ export class BesuTestEnvironment {
   }
 
   // Deploys smart contracts and sets up configurations for testing
-  public async deployAndSetupContracts(claimFormat: ClaimFormat) {
+  public async deployAndSetupContracts(
+    claimFormat: ClaimFormat,
+    contractNameOverride?: string,
+  ) {
+    const contractName = contractNameOverride || this.erc20TokenContract;
+
+    // FIX: Add the dynamic contractName and its ABI to the keychain *before* deploying.
+    // This resolves "contractName in the request does not exist on the keychain" when using dynamic names.
+    this.keychainPlugin1.set(contractName, JSON.stringify(SATPTokenContract));
+
     const deployOutSATPTokenContract = await this.connector.deployContract({
       keychainId: this.keychainPlugin1.getKeychainId(),
-      contractName: this.erc20TokenContract,
+      contractName: contractName, // Use dynamic name
       contractAbi: SATPTokenContract.abi,
       constructorArgs: [this.firstHighNetWorthAccount],
       web3SigningCredential: {
@@ -278,16 +414,25 @@ export class BesuTestEnvironment {
       bytecode: SATPTokenContract.bytecode.object,
       gas: this.gas,
     });
-    expect(deployOutSATPTokenContract).toBeTruthy();
-    expect(deployOutSATPTokenContract.transactionReceipt).toBeTruthy();
-    expect(
+    assert.ok(
+      deployOutSATPTokenContract,
+      "deployOutSATPTokenContract must be truthy",
+    );
+    assert.ok(
+      deployOutSATPTokenContract.transactionReceipt,
+      "deployOutSATPTokenContract.transactionReceipt must be truthy",
+    );
+    assert.ok(
       deployOutSATPTokenContract.transactionReceipt.contractAddress,
-    ).toBeTruthy();
+      "deployOutSATPTokenContract.transactionReceipt.contractAddress must be truthy",
+    );
 
     this.assetContractAddress =
       deployOutSATPTokenContract.transactionReceipt.contractAddress ?? "";
 
-    this.log.info("SATPTokenContract Deployed successfully");
+    this.log.info(
+      `SATPTokenContract (${contractName}) Deployed successfully at ${this.assetContractAddress}`,
+    );
 
     this.besuConfig = {
       networkIdentification: this.network,
@@ -301,6 +446,8 @@ export class BesuTestEnvironment {
       claimFormats: [claimFormat],
       gas: this.gas,
     };
+    // Update erc20TokenContract to the deployed name if it was overridden
+    this.erc20TokenContract = contractName;
   }
 
   // Deploys smart contracts and sets up configurations for testing
@@ -309,10 +456,15 @@ export class BesuTestEnvironment {
     contract_name: string,
     contract: { abi: any; bytecode: { object: string } },
   ): Promise<string> {
+    this.keychainPlugin1.set(
+      contract_name,
+      JSON.stringify(contract), // Store the entire contract JSON (ABI is part of it)
+    );
+
     const blOracleContract = await this.connector.deployContract({
       keychainId: this.keychainPlugin1.getKeychainId(),
       contractName: contract_name,
-      contractAbi: contract.abi,
+      contractAbi: contract.abi, // Pass ABI directly (good practice)
       constructorArgs: [],
       web3SigningCredential: {
         ethAccount: this.bridgeEthAccount.address,
@@ -322,9 +474,15 @@ export class BesuTestEnvironment {
       bytecode: contract.bytecode.object,
       gas: this.gas,
     });
-    expect(blOracleContract).toBeTruthy();
-    expect(blOracleContract.transactionReceipt).toBeTruthy();
-    expect(blOracleContract.transactionReceipt.contractAddress).toBeTruthy();
+    assert.ok(blOracleContract, "blOracleContract must be truthy");
+    assert.ok(
+      blOracleContract.transactionReceipt,
+      "blOracleContract.transactionReceipt must be truthy",
+    );
+    assert.ok(
+      blOracleContract.transactionReceipt.contractAddress,
+      "blOracleContract.transactionReceipt.contractAddress must be truthy",
+    );
 
     this.assetContractAddress =
       blOracleContract.transactionReceipt.contractAddress ?? "";
@@ -347,13 +505,21 @@ export class BesuTestEnvironment {
     return blOracleContract.transactionReceipt.contractAddress!;
   }
 
-  public async mintTokens(amount: string): Promise<void> {
+  public async mintTokens(
+    amount: string,
+    contractAddress?: string,
+  ): Promise<void> {
+    const targetContractAddress = contractAddress || this.assetContractAddress;
+    assert.ok(targetContractAddress, "targetContractAddress must be truthy");
+
     const responseMint = await this.connector.invokeContract({
       contractName: this.erc20TokenContract,
+      contractAddress: targetContractAddress,
       keychainId: this.keychainPlugin1.getKeychainId(),
       invocationType: BesuContractInvocationType.Send,
       methodName: "mint",
       params: [this.firstHighNetWorthAccount, amount],
+      contractAbi: SATPTokenContract.abi, // Original: Pass contractAbi here
       signingCredential: {
         ethAccount: this.firstHighNetWorthAccount,
         secret: this.besuKeyPair.privateKey,
@@ -361,18 +527,26 @@ export class BesuTestEnvironment {
       },
       gas: this.besuConfig.gas,
     });
-    expect(responseMint).toBeTruthy();
-    expect(responseMint.success).toBeTruthy();
+    assert.ok(responseMint, "responseMint must be truthy");
+    assert.ok(responseMint.success, "responseMint.success must be truthy");
     this.log.info("Minted 100 tokens to firstHighNetWorthAccount");
   }
 
-  public async giveRoleToBridge(wrapperAddress: string): Promise<void> {
+  public async giveRoleToBridge(
+    wrapperAddress: string,
+    contractAddress?: string,
+  ): Promise<void> {
+    const targetContractAddress = contractAddress || this.assetContractAddress;
+    assert.ok(targetContractAddress, "targetContractAddress must be truthy");
+
     const giveRoleRes = await this.connector.invokeContract({
       contractName: this.erc20TokenContract,
+      contractAddress: targetContractAddress,
       keychainId: this.keychainPlugin1.getKeychainId(),
       invocationType: BesuContractInvocationType.Send,
       methodName: "grantBridgeRole",
       params: [wrapperAddress],
+      contractAbi: SATPTokenContract.abi, // Original: Pass contractAbi here
       signingCredential: {
         ethAccount: this.firstHighNetWorthAccount,
         secret: this.besuKeyPair.privateKey,
@@ -381,21 +555,27 @@ export class BesuTestEnvironment {
       gas: 1000000,
     });
 
-    expect(giveRoleRes).toBeTruthy();
-    expect(giveRoleRes.success).toBeTruthy();
+    assert.ok(giveRoleRes, "giveRoleRes must be truthy");
+    assert.ok(giveRoleRes.success, "giveRoleRes.success must be truthy");
     this.log.info("BRIDGE_ROLE given to SATPWrapperContract successfully");
   }
 
   public async approveAmount(
     wrapperAddress: string,
     amount: string,
+    contractAddress?: string,
   ): Promise<void> {
+    const targetContractAddress = contractAddress || this.assetContractAddress;
+    assert.ok(targetContractAddress, "targetContractAddress must be truthy");
+
     const responseApprove = await this.connector.invokeContract({
       contractName: this.erc20TokenContract,
+      contractAddress: targetContractAddress,
       keychainId: this.keychainPlugin1.getKeychainId(),
       invocationType: BesuContractInvocationType.Send,
       methodName: "approve",
       params: [wrapperAddress, amount],
+      contractAbi: SATPTokenContract.abi, // Original: Pass contractAbi here
       signingCredential: {
         ethAccount: this.firstHighNetWorthAccount,
         secret: this.besuKeyPair.privateKey,
@@ -403,8 +583,11 @@ export class BesuTestEnvironment {
       },
       gas: this.besuConfig.gas,
     });
-    expect(responseApprove).toBeTruthy();
-    expect(responseApprove.success).toBeTruthy();
+    assert.ok(responseApprove, "responseApprove must be truthy");
+    assert.ok(
+      responseApprove.success,
+      "responseApprove.success must be truthy",
+    );
     this.log.info("Approved 100 tokens to SATPWrapperContract");
   }
 
@@ -455,7 +638,7 @@ export class BesuTestEnvironment {
     const responseBalanceBridge = await this.connector.invokeContract({
       contractName: contract_name,
       contractAddress: contract_address,
-      contractAbi: contract_abi,
+      contractAbi: contract_abi, // Original: Pass contractAbi here
       invocationType: BesuContractInvocationType.Call,
       methodName: "balanceOf",
       params: [account],
@@ -463,9 +646,16 @@ export class BesuTestEnvironment {
       gas: this.besuConfig.gas,
     });
 
-    expect(responseBalanceBridge).toBeTruthy();
-    expect(responseBalanceBridge.success).toBeTruthy();
-    expect(responseBalanceBridge.callOutput).toBe(amount);
+    assert.ok(responseBalanceBridge, "responseBalanceBridge must be truthy");
+    assert.ok(
+      responseBalanceBridge.success,
+      "responseBalanceBridge.success must be truthy",
+    );
+    assert.equal(
+      responseBalanceBridge.callOutput,
+      amount,
+      `Balance mismatch: expected ${amount}, got ${responseBalanceBridge.callOutput}`,
+    );
   }
   // Gets the default asset configuration for testing
   public get defaultAsset(): Asset {
@@ -532,8 +722,8 @@ export class BesuTestEnvironment {
       gas: this.besuConfig.gas,
     });
 
-    expect(response).toBeTruthy();
-    expect(response.success).toBeTruthy();
+    assert.ok(response, "response must be truthy");
+    assert.ok(response.success, "response.success must be truthy");
 
     return response;
   }
@@ -560,15 +750,22 @@ export class BesuTestEnvironment {
       gas: this.besuConfig.gas,
     });
 
-    expect(response).toBeTruthy();
-    expect(response.success).toBeTruthy();
+    assert.ok(response, "response must be truthy");
+    assert.ok(response.success, "response.success must be truthy");
 
     return response;
   }
 
   // Stops and destroys the test ledger
   public async tearDown(): Promise<void> {
-    await this.ledger.stop();
-    await this.ledger.destroy();
+    if (this.ledger) {
+      // Only tear down if this instance started the ledger
+      await this.ledger.stop();
+      await this.ledger.destroy();
+    } else {
+      this.log.warn(
+        "Besu ledger instance not found. Skipping tearDown (likely connected to existing).",
+      );
+    }
   }
 }

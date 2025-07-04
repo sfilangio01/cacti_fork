@@ -1,24 +1,36 @@
+// jest.config.js
+const path = require('path');
+
 /** @type {import('ts-jest/dist/types').JestConfigWithTsJest} */
 module.exports = {
   preset: "ts-jest",
   logHeapUsage: true,
   testEnvironment: "node",
+  // Consolidating moduleNameMapper entries as duplicate keys overwrite
   moduleNameMapper: {
     "^(\\.\\.?\\/.+)\\.jsx?$": "$1",
+    "^(.+)/(.+)_pb\\.js$": "$1/$2_pb",
   },
   modulePathIgnorePatterns: ["./weaver/core"],
   maxWorkers: 1,
   maxConcurrency: 1,
-  setupFilesAfterEnv: ["jest-extended/all", "./jest.setup.console.logs.js"],
-  testTimeout: 60 * 60 * 1000,
-  moduleNameMapper: {
-    "^(.+)/(.+)_pb\\.js$": "$1/$2_pb",
-  },
+  
+  // Existing setupFilesAfterEnv array augmented with the new setup script.
+  // Paths are resolved relative to the jest.config.js file.
+  setupFilesAfterEnv: [
+    "jest-extended/all",
+    "./jest.setup.console.logs.js", // Assuming this is also at the monorepo root or needs correction
+    // --- CORRECTED PATH for setupFilesAfterEnv ---
+    path.resolve(__dirname, 'packages/cactus-plugin-satp-hermes/src/test/typescript/jest.setup-after-env.ts'),
+  ],
+  
+  testTimeout: 60 * 60 * 1000, 
+
   testMatch: [
     `**/cactus-*/src/test/typescript/{unit,integration,benchmark}/**/*.test.ts`,
-    `**/cacti-*/src/test/typescript/{unit,integration,benchmark}/**/*.test.ts`,
+    // Added this pattern to specifically match the example file format if it contains '.test.test.ts'
+    `**/cacti-*/src/test/typescript/{unit,integration,benchmark}/**/*.test.test.ts`, 
   ],
-  // Ignore the tests that are still using tap/tape for as their test runner
   testPathIgnorePatterns: [
     `./packages/cactus-plugin-ledger-connector-ethereum/src/test/typescript/manual/geth-alchemy-integration-manual-check.test.ts`,
     `./packages/cactus-plugin-keychain-aws-sm/src/test/typescript/integration/plugin-factory-keychain.test.ts`,
@@ -54,4 +66,9 @@ module.exports = {
     `./examples/cactus-example-supply-chain-backend/src/test/typescript/integration/supply-chain-backend-api-calls.test.ts`,
     `./examples/cactus-example-supply-chain-backend/src/test/typescript/integration/supply-chain-cli-via-npm-script.test.ts`,
   ],
+
+  // New configurations for Jest Global Setup/Teardown.
+  // Paths are resolved relative to the jest.config.js file.
+  globalSetup: path.resolve(__dirname, 'packages/cactus-plugin-satp-hermes/src/test/typescript/jest.global-setup.ts'),
+  //globalTeardown: path.resolve(__dirname, 'packages/cactus-plugin-satp-hermes/src/test/typescript/jest.global-teardown.ts'),
 };
