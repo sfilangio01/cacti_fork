@@ -18,7 +18,6 @@ import {
   Web3SigningCredentialType,
 } from "@hyperledger/cactus-plugin-ledger-connector-ethereum";
 import { IPluginBungeeHermesOptions } from "@hyperledger/cactus-plugin-bungee-hermes";
-import { expect } from "@jest/globals";
 import {
   GethTestLedger,
   WHALE_ACCOUNT_ADDRESS,
@@ -33,25 +32,51 @@ import {
 import { OntologyManager } from "../../../main/typescript/cross-chain-mechanisms/bridge/ontology/ontology-manager";
 import ExampleOntology from "../../ontologies/ontology-satp-erc20-interact-ethereum.json";
 import { INetworkOptions } from "../../../main/typescript/cross-chain-mechanisms/bridge/bridge-types";
+import * as assert from "assert";
+import Web3 from "web3";
+
+/**
+ * Interface for serializable Ethereum connection configuration.
+ * Used to pass ledger details between global setup and individual test files.
+ */
+export interface IEthereumConnectionConfig {
+  rpcApiHttpHost?: string;
+  rpcApiWsHost?: string;
+  bridgeEthAccount: string;
+  keychainEntryKey: string;
+  keychainEntryValue: string;
+  erc20TokenContract: string;
+  assetContractAddress?: string;
+  networkId: NetworkId;
+  logLevel: LogLevelDesc;
+  chainId: bigint; // Changed type from number to bigint
+}
 
 export interface IEthereumTestEnvironment {
   contractName: string;
   logLevel: LogLevelDesc;
   network?: string;
 }
-// Test environment for Ethereum ledger operations
+
+/**
+ * Test environment for Ethereum ledger operations.
+ * Manages the lifecycle of a Geth test ledger, its connector, and contract deployments.
+ * Supports both starting a new ledger and connecting to an existing one.
+ */
 export class EthereumTestEnvironment {
   public static readonly ETH_ASSET_ID: string = "EthereumExampleAsset";
   public static readonly ETHREFERENCE_ID: string = ExampleOntology.id;
   public static readonly ETH_NETWORK_ID: string = "EthereumLedgerTestNetwork";
+
   public readonly network: NetworkId = {
     id: EthereumTestEnvironment.ETH_NETWORK_ID,
     ledgerType: LedgerType.Ethereum,
   };
-  public ledger!: GethTestLedger;
+
+  public ledger?: GethTestLedger;
   public connector!: PluginLedgerConnectorEthereum;
   public connectorOptions!: IPluginLedgerConnectorEthereumOptions;
-  public bungeeOptions!: IPluginBungeeHermesOptions;
+  public bungeeOptions!: IPluginBungeeHermesOptions; // Not directly used in this class, but part of the original context
   public keychainPlugin1!: PluginKeychainMemory;
   public keychainPlugin2!: PluginKeychainMemory;
   public keychainEntryKey!: string;
@@ -60,22 +85,34 @@ export class EthereumTestEnvironment {
   public erc20TokenContract!: string;
   public contractNameWrapper!: string;
   public assetContractAddress!: string;
-  public wrapperContractAddress!: string;
+  public wrapperContractAddress!: string; // Not explicitly set in this class, but part of config
   public ethereumConfig!: IEthereumLeafNeworkOptions;
   public gasConfig: GasTransactionConfig | undefined = {
     gas: "6721975",
     gasPrice: "20000000000",
   };
+  public rpcApiHttpHost?: string;
+  public rpcApiWsHost?: string;
+  public web3!: Web3;
+  public chainId!: bigint; // Changed type from number to bigint
 
   private dockerNetwork?: string;
+  private startedNetwork: boolean = false; // Flag to indicate if this instance started the ledger
 
   private readonly log: Logger;
 
-  // eslint-disable-next-line prettier/prettier
+  /**
+   * Private constructor to enforce static factory methods for creation.
+   * @param erc20TokenContract The name of the ERC20 token contract.
+   * @param logLevel The log level for the environment.
+   * @param network Optional Docker network name.
+   * @param existingConfig Optional configuration for connecting to an already running ledger.
+   */
   private constructor(
     erc20TokenContract: string,
     logLevel: LogLevelDesc,
     network?: string,
+    existingConfig?: IEthereumConnectionConfig,
   ) {
     if (network) {
       this.dockerNetwork = network;
@@ -87,10 +124,129 @@ export class EthereumTestEnvironment {
     const level = logLevel || "INFO";
     const label = "EthereumTestEnvironment";
     this.log = LoggerProvider.getOrCreate({ level, label });
+
+    // Logic for connecting to an existing ledger
+    if (existingConfig) {
+      this.network = existingConfig.networkId;
+      this.rpcApiHttpHost = existingConfig.rpcApiHttpHost;
+      this.rpcApiWsHost = existingConfig.rpcApiWsHost;
+      this.bridgeEthAccount = existingConfig.bridgeEthAccount;
+      this.keychainEntryKey = existingConfig.keychainEntryKey;
+      this.keychainEntryValue = existingConfig.keychainEntryValue;
+      this.erc20TokenContract = existingConfig.erc20TokenContract;
+      this.assetContractAddress = existingConfig.assetContractAddress!;
+      this.chainId = existingConfig.chainId; // Assign the chainId from existing config
+
+      assert.ok(
+        this.rpcApiHttpHost,
+        "rpcApiHttpHost must be available for Web3 initialization",
+      );
+      this.web3 = new Web3(this.rpcApiHttpHost);
+
+      // Re-initialize keychains and plugins for the current process
+      // Ensure that the contract definition includes the deployed address for the specific network ID (chainId)
+      const SATPTokenContract1 = {
+        ...SATPTokenContract, // Spread existing properties
+        networks: {
+          [this.chainId.toString()]: {
+            // Use chainId as string key for the network
+            address: existingConfig.assetContractAddress,
+            events: {},
+            links: {},
+          },
+        },
+      };
+      const SATPWrapperContract1 = {
+        ...SATPWrapperContract, // Spread existing properties
+        networks: {
+          [this.chainId.toString()]: {
+            // Use chainId as string key for the network
+            address: this.wrapperContractAddress, // Assuming wrapper address is also in existingConfig if needed
+            events: {},
+            links: {},
+          },
+        },
+      };
+
+      this.keychainPlugin1 = new PluginKeychainMemory({
+        instanceId: uuidv4(),
+        keychainId: uuidv4(),
+        backend: new Map([[this.keychainEntryKey, this.keychainEntryValue]]),
+        logLevel,
+      });
+
+      this.keychainPlugin2 = new PluginKeychainMemory({
+        instanceId: uuidv4(),
+        keychainId: uuidv4(),
+        backend: new Map([[this.keychainEntryKey, this.keychainEntryValue]]),
+        logLevel,
+      });
+
+      this.log.info(
+        `Keychain plugins initialized with key: ${this.keychainEntryKey}`,
+      );
+      this.log.info(`Keychain entry value: ${this.keychainEntryValue}`);
+      this.log.info(`ERC20 Token Contract: ${this.erc20TokenContract}`);
+      this.log.info(`Asset Contract Address: ${this.assetContractAddress}`);
+      this.log.info(`Network ID: ${this.network.id}`);
+      this.log.info(`Chain ID: ${this.chainId}`);
+      this.log.info(`RPC API HTTP Host: ${this.rpcApiHttpHost}`);
+
+      this.keychainPlugin1.set(
+        this.erc20TokenContract,
+        JSON.stringify(SATPTokenContract1),
+      );
+      this.keychainPlugin2.set(
+        this.contractNameWrapper,
+        JSON.stringify(SATPWrapperContract1),
+      );
+
+      const pluginRegistry = new PluginRegistry({
+        plugins: [this.keychainPlugin1, this.keychainPlugin2],
+      });
+
+      this.connectorOptions = {
+        instanceId: uuidv4(),
+        rpcApiHttpHost: this.rpcApiHttpHost,
+        rpcApiWsHost: this.rpcApiWsHost,
+        pluginRegistry,
+        logLevel,
+      };
+
+      this.connector = new PluginLedgerConnectorEthereum(this.connectorOptions);
+
+      this.ethereumConfig = {
+        networkIdentification: this.network,
+        signingCredential: {
+          ethAccount: this.bridgeEthAccount,
+          secret: "test",
+          type: Web3SigningCredentialType.GethKeychainPassword,
+        },
+        leafId: "Testing-event-ethereum-leaf",
+        connectorOptions: this.connectorOptions,
+        claimFormats: [], // This will be populated later if needed
+        gasConfig: this.gasConfig,
+      };
+      this.startedNetwork = false; // This instance connects to existing, doesn't start
+    } else {
+      // Original logic for new setup (used in global-setup)
+      this.startedNetwork = true; // This instance starts the ledger
+    }
   }
 
-  // Initializes the Ethereum ledger, accounts, and connector for testing
+  /**
+   * Initializes the Ethereum ledger, accounts, and connector for testing.
+   * This method is ONLY CALLED ONCE in the global setup (`jest.global-setup.ts`).
+   * It starts a new Geth ledger container.
+   * @param logLevel The log level for the environment.
+   */
   public async init(logLevel: LogLevelDesc): Promise<void> {
+    // Only proceed if this instance is designated to start the ledger
+    if (!this.startedNetwork) {
+      this.log.warn("Ethereum init() skipped, ledger already initialized.");
+      return;
+    }
+
     this.ledger = new GethTestLedger({
       containerImageName: "ghcr.io/hyperledger/cacti-geth-all-in-one",
       containerImageVersion: "2023-07-27-2a8c48ed6",
@@ -110,7 +266,12 @@ export class EthereumTestEnvironment {
       bytecode: SATPWrapperContract.bytecode.object,
     };
 
-    const rpcApiWsHost = await this.ledger.getRpcApiWebSocketHost();
+    this.rpcApiWsHost = await this.ledger.getRpcApiWebSocketHost();
+    this.rpcApiHttpHost = await this.ledger.getRpcApiHttpHost();
+
+    this.web3 = new Web3(this.rpcApiHttpHost); // Initialize Web3 for new setup
+    this.chainId = await this.web3.eth.getChainId(); // Get and store the actual chain ID
+
     this.bridgeEthAccount = await this.ledger.newEthPersonalAccount();
     this.keychainEntryValue = "test";
     this.keychainEntryKey = this.bridgeEthAccount;
@@ -129,6 +290,9 @@ export class EthereumTestEnvironment {
       logLevel,
     });
 
+    // Store the contract definitions in the keychain.
+    // The `deployContract` method of the connector will later update the `networks` property
+    // with the deployed address using the actual chain ID as the key.
     this.keychainPlugin1.set(
       this.erc20TokenContract,
       JSON.stringify(SATPTokenContract1),
@@ -144,12 +308,26 @@ export class EthereumTestEnvironment {
 
     this.connectorOptions = {
       instanceId: uuidv4(),
-      rpcApiWsHost,
+      rpcApiWsHost: this.rpcApiWsHost,
+      rpcApiHttpHost: this.rpcApiHttpHost,
       pluginRegistry,
       logLevel,
     };
 
     this.connector = new PluginLedgerConnectorEthereum(this.connectorOptions);
+
+    this.ethereumConfig = {
+      networkIdentification: this.network,
+      signingCredential: {
+        ethAccount: this.bridgeEthAccount,
+        secret: "test",
+        type: Web3SigningCredentialType.GethKeychainPassword,
+      },
+      leafId: "Testing-event-ethereum-leaf",
+      connectorOptions: this.connectorOptions,
+      claimFormats: [],
+      gasConfig: this.gasConfig,
+    };
   }
 
   public getTestContractAddress(): string {
@@ -196,7 +374,12 @@ export class EthereumTestEnvironment {
     };
   }
 
-  // Creates and initializes a new EthereumTestEnvironment instance
+  /**
+   * Creates and initializes a new EthereumTestEnvironment instance.
+   * This is used in the global setup (`jest.global-setup.ts`) to start a fresh ledger.
+   * @param config Configuration for the new test environment.
+   * @returns A promise that resolves to the initialized EthereumTestEnvironment instance.
+   */
   public static async setupTestEnvironment(
     config: IEthereumTestEnvironment,
   ): Promise<EthereumTestEnvironment> {
@@ -209,7 +392,29 @@ export class EthereumTestEnvironment {
     return instance;
   }
 
-  // this creates the same config as the bridge manager does
+  /**
+   * Connects to an already existing EthereumTestLedger.
+   * This is used by individual test files (`besu_ethereum.test.ts`) to reuse the ledger
+   * started by the global setup.
+   * @param config Configuration for connecting to the existing environment.
+   * @returns A promise that resolves to the connected EthereumTestEnvironment instance.
+   */
+  public static async connectToExistingEnvironment(
+    config: IEthereumConnectionConfig,
+  ): Promise<EthereumTestEnvironment> {
+    const instance = new EthereumTestEnvironment(
+      config.erc20TokenContract,
+      config.logLevel,
+      undefined, // No new network to start
+      config, // Pass the full connection config
+    );
+    return instance;
+  }
+
+  /**
+   * Creates the network options configuration as expected by the bridge manager.
+   * @returns The network options for the Ethereum leaf.
+   */
   public createEthereumLeafConfig(
     ontologyManager: OntologyManager,
     logLevel?: LogLevelDesc,
@@ -225,7 +430,7 @@ export class EthereumTestEnvironment {
         instanceId: this.connectorOptions.instanceId,
         rpcApiHttpHost: this.connectorOptions.rpcApiHttpHost,
         rpcApiWsHost: this.connectorOptions.rpcApiWsHost,
-        pluginRegistry: new PluginRegistry({ plugins: [] }),
+        pluginRegistry: new PluginRegistry({ plugins: [] }), // New registry for this leaf
         logLevel: logLevel,
       },
       claimFormats: this.ethereumConfig.claimFormats,
@@ -233,7 +438,11 @@ export class EthereumTestEnvironment {
     };
   }
 
-  // this is the config to be loaded by the gateway, does not contain the log level because it will use the one in the gateway config
+  /**
+   * Creates the configuration to be loaded by the SATP Gateway.
+   * Does not contain the log level, as it will use the one from the gateway config.
+   * @returns The network options for the gateway.
+   */
   public createEthereumConfig(): INetworkOptions {
     return {
       networkIdentification: this.ethereumConfig.networkIdentification,
@@ -249,7 +458,11 @@ export class EthereumTestEnvironment {
     } as INetworkOptions;
   }
 
-  // this is the config to be loaded by the gateway when in a docker, does not contain the log level because it will use the one in the gateway config
+  /**
+   * Creates the configuration to be loaded by the gateway when running in a Docker environment.
+   * Uses the ledger's dynamic RPC hosts.
+   * @returns The network options for the gateway in a Docker setup.
+   */
   public async createEthereumDockerConfig(): Promise<INetworkOptions> {
     return {
       networkIdentification: this.ethereumConfig.networkIdentification,
@@ -258,14 +471,18 @@ export class EthereumTestEnvironment {
       wrapperContractAddress: this.ethereumConfig.wrapperContractAddress,
       gasConfig: this.ethereumConfig.gasConfig,
       connectorOptions: {
-        rpcApiHttpHost: await this.ledger.getRpcApiHttpHost(false),
-        rpcApiWsHost: await this.ledger.getRpcApiWebSocketHost(false),
+        rpcApiHttpHost: this.ledger?.getRpcApiHttpHost(false),
+        rpcApiWsHost: this.ledger?.getRpcApiWebSocketHost(false),
       },
       claimFormats: this.ethereumConfig.claimFormats,
     } as INetworkOptions;
   }
 
-  // Deploys smart contracts and sets up configurations for testing
+  /**
+   * Deploys the SATPTokenContract and sets up initial configurations for testing.
+   * This is called once during the global setup.
+   * @param claimFormat The claim format to be used.
+   */
   public async deployAndSetupContracts(claimFormat: ClaimFormat) {
     const deployOutSATPTokenContract = await this.connector.deployContract({
       contract: {
@@ -279,11 +496,18 @@ export class EthereumTestEnvironment {
         type: Web3SigningCredentialType.GethKeychainPassword,
       },
     });
-    expect(deployOutSATPTokenContract).toBeTruthy();
-    expect(deployOutSATPTokenContract.transactionReceipt).toBeTruthy();
-    expect(
+    assert.ok(
+      deployOutSATPTokenContract,
+      "deployOutSATPTokenContract must be truthy",
+    );
+    assert.ok(
+      deployOutSATPTokenContract.transactionReceipt,
+      "transactionReceipt must be truthy",
+    );
+    assert.ok(
       deployOutSATPTokenContract.transactionReceipt.contractAddress,
-    ).toBeTruthy();
+      "contractAddress must be truthy",
+    );
 
     this.assetContractAddress =
       deployOutSATPTokenContract.transactionReceipt.contractAddress ?? "";
@@ -306,7 +530,13 @@ export class EthereumTestEnvironment {
     this.log.info("BRIDGE_ROLE given to SATPWrapperContract successfully");
   }
 
-  // Deploys smart contracts and sets up configurations for testing
+  /**
+   * Deploys Oracle smart contracts and sets up configurations for testing.
+   * @param claimFormat The claim format.
+   * @param contract_name The name of the oracle contract.
+   * @param contract The contract ABI and bytecode.
+   * @returns The deployed contract address.
+   */
   public async deployAndSetupOracleContracts(
     claimFormat: ClaimFormat,
     contract_name: string,
@@ -325,9 +555,15 @@ export class EthereumTestEnvironment {
       web3SigningCredential: this.getTestOracleSigningCredential(),
       gasConfig: this.gasConfig,
     });
-    expect(blOracleContract).toBeTruthy();
-    expect(blOracleContract.transactionReceipt).toBeTruthy();
-    expect(blOracleContract.transactionReceipt.contractAddress).toBeTruthy();
+    assert.ok(blOracleContract, "blOracleContract must be truthy");
+    assert.ok(
+      blOracleContract.transactionReceipt,
+      "transactionReceipt must be truthy",
+    );
+    assert.ok(
+      blOracleContract.transactionReceipt.contractAddress,
+      "contractAddress must be truthy",
+    );
 
     this.assetContractAddress =
       blOracleContract.transactionReceipt.contractAddress ?? "";
@@ -345,6 +581,10 @@ export class EthereumTestEnvironment {
     return blOracleContract.transactionReceipt.contractAddress!;
   }
 
+  /**
+   * Mints a specified amount of tokens to the WHALE_ACCOUNT_ADDRESS.
+   * @param amount The amount of tokens to mint.
+   */
   public async mintTokens(amount: string): Promise<void> {
     const responseMint = await this.connector.invokeContract({
       contract: {
@@ -360,11 +600,15 @@ export class EthereumTestEnvironment {
         type: Web3SigningCredentialType.GethKeychainPassword,
       },
     });
-    expect(responseMint).toBeTruthy();
-    expect(responseMint.success).toBeTruthy();
-    this.log.info("Minted 100 tokens to firstHighNetWorthAccount");
+    assert.ok(responseMint, "responseMint must be truthy");
+    assert.ok(responseMint.success, "responseMint.success must be truthy");
+    this.log.info(`Minted ${amount} tokens to WHALE_ACCOUNT_ADDRESS`);
   }
 
+  /**
+   * Grants the BRIDGE_ROLE to a specified wrapper address on the ERC20 token contract.
+   * @param wrapperAddress The address of the wrapper contract to grant the role to.
+   */
   public async giveRoleToBridge(wrapperAddress: string): Promise<void> {
     const giveRoleRes = await this.connector.invokeContract({
       contract: {
@@ -381,11 +625,16 @@ export class EthereumTestEnvironment {
       },
     });
 
-    expect(giveRoleRes).toBeTruthy();
-    expect(giveRoleRes.success).toBeTruthy();
+    assert.ok(giveRoleRes, "giveRoleRes must be truthy");
+    assert.ok(giveRoleRes.success, "giveRoleRes.success must be truthy");
     this.log.info("BRIDGE_ROLE given to SATPWrapperContract successfully");
   }
 
+  /**
+   * Approves a specified amount of tokens for a wrapper address on the ERC20 token contract.
+   * @param wrapperAddress The address of the wrapper contract to approve tokens for.
+   * @param amount The amount of tokens to approve.
+   */
   public async approveAmount(
     wrapperAddress: string,
     amount: string,
@@ -404,11 +653,23 @@ export class EthereumTestEnvironment {
         type: Web3SigningCredentialType.GethKeychainPassword,
       },
     });
-    expect(responseApprove).toBeTruthy();
-    expect(responseApprove.success).toBeTruthy();
-    this.log.info("Approved 100 tokens to SATPWrapperContract");
+    assert.ok(responseApprove, "responseApprove must be truthy");
+    assert.ok(
+      responseApprove.success,
+      "responseApprove.success must be truthy",
+    );
+    this.log.info(`Approved ${amount} tokens to SATPWrapperContract`);
   }
 
+  /**
+   * Checks the balance of an account on a specified contract.
+   * @param contract_name The name of the contract.
+   * @param contract_address The address of the contract.
+   * @param contract_abi The ABI of the contract.
+   * @param account The account address to check balance for.
+   * @param amount The expected amount.
+   * @param signingCredential The signing credential for the transaction.
+   */
   public async checkBalance(
     contract_name: string,
     contract_address: string,
@@ -422,7 +683,7 @@ export class EthereumTestEnvironment {
         contractJSON: {
           contractName: contract_name,
           abi: contract_abi,
-          bytecode: contract_abi.object,
+          bytecode: SATPTokenContract.bytecode.object, // Use the actual bytecode object from the JSON
         },
         contractAddress: contract_address,
       },
@@ -432,11 +693,21 @@ export class EthereumTestEnvironment {
       web3SigningCredential: signingCredential,
     });
 
-    expect(responseBalanceBridge).toBeTruthy();
-    expect(responseBalanceBridge.success).toBeTruthy();
-    expect(responseBalanceBridge.callOutput.toString()).toBe(amount);
+    assert.ok(responseBalanceBridge, "responseBalanceBridge must be truthy");
+    assert.ok(
+      responseBalanceBridge.success,
+      "responseBalanceBridge.success must be truthy",
+    );
+    assert.strictEqual(
+      responseBalanceBridge.callOutput.toString(),
+      amount,
+      "Balance mismatch",
+    );
   }
-  // Gets the default asset configuration for testing
+
+  /**
+   * Gets the default asset configuration for testing.
+   */
   public get defaultAsset(): Asset {
     return {
       id: EthereumTestEnvironment.ETH_ASSET_ID,
@@ -449,17 +720,38 @@ export class EthereumTestEnvironment {
     };
   }
 
-  // Returns the whale account address used for testing transactions
+  /**
+   * Returns the whale account address used for testing transactions.
+   */
   get transactRequestPubKey(): string {
     return WHALE_ACCOUNT_ADDRESS;
   }
 
-  // Stops and destroys the test ledger
+  /**
+   * Stops and destroys the test ledger.
+   * Only performs teardown if this instance was responsible for starting the network.
+   */
   public async tearDown(): Promise<void> {
-    await this.ledger.stop();
-    await this.ledger.destroy();
+    if (this.startedNetwork && this.ledger) {
+      await this.ledger.stop();
+      await this.ledger.destroy();
+      this.log.info("Ethereum ledger stopped and destroyed successfully.");
+    } else {
+      this.log.warn(
+        "Ethereum ledger instance not found or not the network starter. Skipping tearDown.",
+      );
+    }
   }
 
+  /**
+   * Writes data to a specified contract on the Ethereum ledger.
+   * @param contractName The name of the contract.
+   * @param contractAddress The address of the contract.
+   * @param contractAbi The ABI of the contract.
+   * @param methodName The method name to invoke.
+   * @param params Parameters for the method.
+   * @returns The invocation response.
+   */
   public async writeData(
     contractName: string,
     contractAddress: string,
@@ -467,12 +759,12 @@ export class EthereumTestEnvironment {
     methodName: string,
     params: string[],
   ): Promise<InvokeContractV1Response> {
-    return await this.connector.invokeContract({
+    const response = await this.connector.invokeContract({
       contract: {
         contractJSON: {
           contractName: contractName,
           abi: contractAbi,
-          bytecode: contractAbi.object,
+          bytecode: SATPTokenContract.bytecode.object, // Use actual bytecode object
         },
         contractAddress: contractAddress,
       },
@@ -481,8 +773,19 @@ export class EthereumTestEnvironment {
       params: params,
       web3SigningCredential: this.getTestOracleSigningCredential(),
     });
+    assert.ok(response, "Response must be truthy");
+    return response;
   }
 
+  /**
+   * Reads data from a specified contract on the Ethereum ledger.
+   * @param contractName The name of the contract.
+   * @param contractAddress The address of the contract.
+   * @param contractAbi The ABI of the contract.
+   * @param methodName The method name to invoke.
+   * @param params Parameters for the method.
+   * @returns The invocation response.
+   */
   public readData(
     contractName: string,
     contractAddress: string,
@@ -490,12 +793,12 @@ export class EthereumTestEnvironment {
     methodName: string,
     params: string[],
   ): Promise<InvokeContractV1Response> {
-    return this.connector.invokeContract({
+    const response = this.connector.invokeContract({
       contract: {
         contractJSON: {
           contractName: contractName,
           abi: contractAbi,
-          bytecode: contractAbi.object,
+          bytecode: SATPTokenContract.bytecode.object, // Use actual bytecode object
         },
         contractAddress: contractAddress,
       },
@@ -504,5 +807,7 @@ export class EthereumTestEnvironment {
       params: params,
       web3SigningCredential: this.getTestOracleSigningCredential(),
     });
+    assert.ok(response, "Response must be truthy");
+    return response;
   }
 }

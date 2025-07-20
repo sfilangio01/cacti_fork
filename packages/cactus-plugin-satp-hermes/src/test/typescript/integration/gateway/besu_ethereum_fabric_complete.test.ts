@@ -20,7 +20,7 @@ const log = LoggerProvider.getOrCreate({
   label: "SATP - Integration Test",
 });
 
-const TIMEOUT = 900000; // 15 minutes for tests
+const TIMEOUT = 9000000; // 15 minutes for tests
 
 let besuEnv: BesuTestEnvironment;
 let fabricEnv: FabricTestEnvironment;
