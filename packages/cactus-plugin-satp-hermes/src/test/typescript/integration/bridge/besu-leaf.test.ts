@@ -27,28 +27,9 @@ let besuEnv: BesuTestEnvironment;
 const TIMEOUT = 60000;
 
 beforeAll(async () => {
-  await pruneDockerAllIfGithubAction({ logLevel })
-    .then(() => {
-      log.info("Pruning throw OK");
-    })
-    .catch(async () => {
-      await Containers.logDiagnostics({ logLevel });
-      fail("Pruning didn't throw OK");
-    });
-  {
-    const erc20TokenContract = "SATPContract";
+  
 
-    const ontologiesPath = path.join(__dirname, "../../../ontologies");
-
-    ontologyManager = new OntologyManager({
-      logLevel,
-      ontologiesPath: ontologiesPath,
-    });
-
-    besuEnv = await BesuTestEnvironment.setupTestEnvironment({
-      contractName: erc20TokenContract,
-      logLevel,
-    });
+    besuEnv = await BesuTestEnvironment.connectToExistingEnvironment()
     log.info("Besu Ledger started successfully");
 
     await besuEnv.deployAndSetupContracts(ClaimFormat.DEFAULT);

@@ -1,5 +1,5 @@
 // jest.config.js
-const path = require('path');
+const path = require("path");
 
 /** @type {import('ts-jest/dist/types').JestConfigWithTsJest} */
 module.exports = {
@@ -14,22 +14,13 @@ module.exports = {
   modulePathIgnorePatterns: ["./weaver/core"],
   maxWorkers: 1,
   maxConcurrency: 1,
-  
-  // Existing setupFilesAfterEnv array augmented with the new setup script.
-  // Paths are resolved relative to the jest.config.js file.
-  setupFilesAfterEnv: [
-    "jest-extended/all",
-    "./jest.setup.console.logs.js", // Assuming this is also at the monorepo root or needs correction
-    // --- CORRECTED PATH for setupFilesAfterEnv ---
-    path.resolve(__dirname, 'packages/cactus-plugin-satp-hermes/src/test/typescript/jest.setup-after-env.ts'),
-  ],
-  
-  testTimeout: 60 * 60 * 1000, 
+
+  testTimeout: 60 * 60 * 1000,
 
   testMatch: [
     `**/cactus-*/src/test/typescript/{unit,integration,benchmark}/**/*.test.ts`,
     // Added this pattern to specifically match the example file format if it contains '.test.test.ts'
-    `**/cacti-*/src/test/typescript/{unit,integration,benchmark}/**/*.test.test.ts`, 
+    `**/cacti-*/src/test/typescript/{unit,integration,benchmark}/**/*.test.test.ts`,
   ],
   testPathIgnorePatterns: [
     `./packages/cactus-plugin-ledger-connector-ethereum/src/test/typescript/manual/geth-alchemy-integration-manual-check.test.ts`,
@@ -69,6 +60,9 @@ module.exports = {
 
   // New configurations for Jest Global Setup/Teardown.
   // Paths are resolved relative to the jest.config.js file.
-  globalSetup: path.resolve(__dirname, 'packages/cactus-plugin-satp-hermes/src/test/typescript/jest.global-setup.ts'),
+  globalSetup: path.resolve(
+    __dirname,
+    "packages/cactus-plugin-satp-hermes/src/test/typescript/jest.global-setup.ts",
+  ),
   //globalTeardown: path.resolve(__dirname, 'packages/cactus-plugin-satp-hermes/src/test/typescript/jest.global-teardown.ts'),
 };

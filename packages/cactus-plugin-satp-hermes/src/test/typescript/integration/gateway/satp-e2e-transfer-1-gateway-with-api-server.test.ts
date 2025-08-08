@@ -2,10 +2,6 @@ import "jest-extended";
 import { LogLevelDesc, LoggerProvider } from "@hyperledger/cactus-common";
 import { v4 as uuidv4 } from "uuid";
 import {
-  pruneDockerAllIfGithubAction,
-  Containers,
-} from "@hyperledger/cactus-test-tooling";
-import {
   SATPGatewayConfig,
   SATPGateway,
   PluginFactorySATPGateway,
@@ -14,6 +10,7 @@ import {
   GetApproveAddressApi,
   TokenType,
 } from "../../../../main/typescript";
+import * as fs from "fs-extra";
 import {
   Address,
   GatewayIdentity,
@@ -29,6 +26,9 @@ import {
   FabricTestEnvironment,
   getTransactRequest,
 } from "../../test-utils";
+import { IBesuConnectionConfig } from "../../environments/besu-test-environment";
+import { IFabricConnectionConfig } from "../../environments/fabric-test-environment";
+import { IEthereumConnectionConfig } from "../../environments/ethereum-test-environment";
 import {
   SATP_ARCHITECTURE_VERSION,
   SATP_CORE_VERSION,
@@ -56,21 +56,48 @@ let fabricEnv: FabricTestEnvironment;
 let gateway: SATPGateway;
 
 const TIMEOUT = 900000; // 15 minutes
-afterAll(async () => {
-  await besuEnv.tearDown();
-  await ethereumEnv.tearDown();
-  await fabricEnv.tearDown();
 
-  await pruneDockerAllIfGithubAction({ logLevel })
-    .then(() => {
-      log.info("Pruning throw OK");
-    })
-    .catch(async () => {
-      await Containers.logDiagnostics({ logLevel });
-      fail("Pruning didn't throw OK");
-    });
+interface ICombinedLedgerConfigs {
+  besu: IBesuConnectionConfig;
+  fabric: IFabricConnectionConfig;
+  ethereum: IEthereumConnectionConfig;
+}
+
+beforeAll(async () => {
+  const configPath = process.env.TEST_ENV_CONFIG_PATH;
+  if (!configPath) {
+    throw new Error(
+      "TEST_ENV_CONFIG_PATH environment variable not set. Global setup likely failed or wasn't run.",
+    );
+  }
+
+  const loadedLedgerConfigs: ICombinedLedgerConfigs =
+    await fs.readJson(configPath);
+  log.info(`Loaded ledger configurations from ${configPath}`); // Connect to existing Besu, Fabric, and Ethereum environments
+
+  besuEnv = await BesuTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.besu,
+  );
+  log.info("Connected to existing Besu Ledger successfully.");
+
+  fabricEnv = await FabricTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.fabric,
+  );
+  log.info("Connected to existing Fabric Ledger successfully."); // Connect to existing Ethereum environment
+
+  ethereumEnv = await EthereumTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.ethereum,
+  );
+  log.info("Connected to existing Ethereum Ledger successfully."); // Access the globally initialized SATP Gateway instance
+
+  await besuEnv.deployAndSetupContracts(ClaimFormat.BUNGEE);
+  log.info("Besu contracts deployed and setup successfully.");
+  await ethereumEnv.deployAndSetupContracts(ClaimFormat.BUNGEE);
+  log.info("Ethereum contracts deployed and setup successfully.");
+  await fabricEnv.deployAndSetupContracts();
+  log.info(`Fabric SATP contracts deployed and initialized.`);
+  
 }, TIMEOUT);
-
 afterEach(async () => {
   if (gateway) {
     await gateway.shutdown();
@@ -80,49 +107,6 @@ afterEach(async () => {
   }
   if (knexSourceRemoteClient) {
     await knexSourceRemoteClient.destroy();
-  }
-}, TIMEOUT);
-
-beforeAll(async () => {
-  pruneDockerAllIfGithubAction({ logLevel })
-    .then(() => {
-      log.info("Pruning throw OK");
-    })
-    .catch(async () => {
-      await Containers.logDiagnostics({ logLevel });
-      fail("Pruning didn't throw OK");
-    });
-
-  {
-    const satpContractName = "satp-contract";
-    fabricEnv = await FabricTestEnvironment.setupTestEnvironment({
-      contractName: satpContractName,
-      claimFormat: ClaimFormat.BUNGEE,
-      logLevel,
-    });
-    log.info("Fabric Ledger started successfully");
-
-    await fabricEnv.deployAndSetupContracts();
-  }
-
-  {
-    const erc20TokenContract = "SATPContract";
-    besuEnv = await BesuTestEnvironment.setupTestEnvironment({
-      contractName: erc20TokenContract,
-      logLevel,
-    });
-    log.info("Besu Ledger started successfully");
-
-    await besuEnv.deployAndSetupContracts(ClaimFormat.BUNGEE);
-  }
-  {
-    const erc20TokenContract = "SATPContract";
-    ethereumEnv = await EthereumTestEnvironment.setupTestEnvironment({
-      contractName: erc20TokenContract,
-      logLevel,
-    });
-    log.info("Ethereum Ledger started successfully");
-    await ethereumEnv.deployAndSetupContracts(ClaimFormat.BUNGEE);
   }
 }, TIMEOUT);
 

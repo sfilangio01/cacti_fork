@@ -1,10 +1,6 @@
 import "jest-extended";
 import { LogLevelDesc, LoggerProvider } from "@hyperledger/cactus-common";
 import {
-  pruneDockerAllIfGithubAction,
-  Containers,
-} from "@hyperledger/cactus-test-tooling";
-import {
   SATPGatewayConfig,
   SATPGateway,
   PluginFactorySATPGateway,
@@ -24,6 +20,10 @@ import {
   PluginImportType,
 } from "@hyperledger/cactus-core-api";
 import { ClaimFormat } from "../../../../main/typescript/generated/proto/cacti/satp/v02/common/message_pb";
+import { IBesuConnectionConfig } from "../../environments/besu-test-environment";
+import { IFabricConnectionConfig } from "../../environments/fabric-test-environment";
+import { IEthereumConnectionConfig } from "../../environments/ethereum-test-environment";
+import * as fs from "fs-extra";
 import {
   BesuTestEnvironment,
   EthereumTestEnvironment,
@@ -56,54 +56,54 @@ let ethereumContractAddress: string;
 let data_hash: string;
 
 const TIMEOUT = 900000; // 15 minutes
+
+interface ICombinedLedgerConfigs {
+  besu: IBesuConnectionConfig;
+  fabric: IFabricConnectionConfig;
+  ethereum: IEthereumConnectionConfig;
+}
+
 beforeAll(async () => {
-  pruneDockerAllIfGithubAction({ logLevel })
-    .then(() => {
-      log.info("Pruning throw OK");
-    })
-    .catch(async () => {
-      await Containers.logDiagnostics({ logLevel });
-      fail("Pruning didn't throw OK");
-    });
-
-  {
-    const businessLogicContract = "OracleTestContract";
-
-    try {
-      besuEnv = await BesuTestEnvironment.setupTestEnvironment({
-        contractName: businessLogicContract,
-        logLevel,
-      });
-      log.info("Besu Ledger started successfully");
-
-      ethereumEnv = await EthereumTestEnvironment.setupTestEnvironment({
-        contractName: businessLogicContract,
-        logLevel,
-      });
-
-      fabricEnv = await FabricTestEnvironment.setupTestEnvironment({
-        contractName: businessLogicContract,
-        logLevel,
-      });
-    } catch (err) {
-      log.error("Error starting ledgers: ", err);
-    }
-
-    besuContractAddress = await besuEnv.deployAndSetupOracleContracts(
-      ClaimFormat.BUNGEE,
-      "OracleTestContract",
-      OracleTestContract,
+  const configPath = process.env.TEST_ENV_CONFIG_PATH;
+  if (!configPath) {
+    throw new Error(
+      "TEST_ENV_CONFIG_PATH environment variable not set. Global setup likely failed or wasn't run.",
     );
-
-    ethereumContractAddress = await ethereumEnv.deployAndSetupOracleContracts(
-      ClaimFormat.BUNGEE,
-      "OracleTestContract",
-      OracleTestContract,
-    );
-
-    await fabricEnv.deployAndSetupContracts();
   }
 
+  const loadedLedgerConfigs: ICombinedLedgerConfigs =
+    await fs.readJson(configPath);
+  log.info(`Loaded ledger configurations from ${configPath}`); // Connect to existing Besu, Fabric, and Ethereum environments
+
+  besuEnv = await BesuTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.besu,
+  );
+  log.info("Connected to existing Besu Ledger successfully.");
+
+  fabricEnv = await FabricTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.fabric,
+  );
+  log.info("Connected to existing Fabric Ledger successfully."); // Connect to existing Ethereum environment
+
+  ethereumEnv = await EthereumTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.ethereum,
+  );
+  log.info("Connected to existing Ethereum Ledger successfully."); // Access the globally initialized SATP Gateway instance
+
+  besuContractAddress = await besuEnv.deployAndSetupOracleContracts(
+    ClaimFormat.BUNGEE,
+    "OracleTestContract",
+    OracleTestContract,
+  );
+  log.info("Besu contracts deployed and setup successfully.");
+  ethereumContractAddress = await ethereumEnv.deployAndSetupOracleContracts(
+    ClaimFormat.BUNGEE,
+    "OracleTestContract",
+    OracleTestContract,
+  );
+  log.info("Ethereum contracts deployed and setup successfully.");
+  await fabricEnv.deployAndSetupContracts();
+  log.info(`Fabric SATP contracts deployed and initialized.`);
   //setup satp gateway
   const factoryOptions: IPluginFactoryOptions = {
     pluginImportType: PluginImportType.Local,
@@ -158,22 +158,6 @@ beforeAll(async () => {
     new Configuration({ basePath: gateway.getAddressOApiAddress() }),
   );
   expect(oracleApi).toBeTruthy();
-}, TIMEOUT);
-
-afterAll(async () => {
-  await gateway.shutdown();
-  await besuEnv.tearDown();
-  await ethereumEnv.tearDown();
-  await fabricEnv.tearDown();
-
-  await pruneDockerAllIfGithubAction({ logLevel })
-    .then(() => {
-      log.info("Pruning throw OK");
-    })
-    .catch(async () => {
-      await Containers.logDiagnostics({ logLevel });
-      fail("Pruning didn't throw OK");
-    });
 }, TIMEOUT);
 
 describe("Oracle executing READ, UPDATE, and READ_AND_UPDATE tasks successfully", () => {

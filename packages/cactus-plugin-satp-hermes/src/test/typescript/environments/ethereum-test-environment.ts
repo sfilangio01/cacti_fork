@@ -145,8 +145,9 @@ export class EthereumTestEnvironment {
 
       // Re-initialize keychains and plugins for the current process
       // Ensure that the contract definition includes the deployed address for the specific network ID (chainId)
-      const SATPTokenContract1 = {
-        ...SATPTokenContract, // Spread existing properties
+      const SATPTokenContractForKeychain = {
+        abi: SATPTokenContract.abi,
+        bytecode: SATPTokenContract.bytecode.object, // FIX: Directly use the bytecode string
         networks: {
           [this.chainId.toString()]: {
             // Use chainId as string key for the network
@@ -156,8 +157,9 @@ export class EthereumTestEnvironment {
           },
         },
       };
-      const SATPWrapperContract1 = {
-        ...SATPWrapperContract, // Spread existing properties
+      const SATPWrapperContractForKeychain = {
+        abi: SATPWrapperContract.abi,
+        bytecode: SATPWrapperContract.bytecode.object, // FIX: Directly use the bytecode string
         networks: {
           [this.chainId.toString()]: {
             // Use chainId as string key for the network
@@ -194,11 +196,11 @@ export class EthereumTestEnvironment {
 
       this.keychainPlugin1.set(
         this.erc20TokenContract,
-        JSON.stringify(SATPTokenContract1),
+        JSON.stringify(SATPTokenContractForKeychain),
       );
       this.keychainPlugin2.set(
         this.contractNameWrapper,
-        JSON.stringify(SATPWrapperContract1),
+        JSON.stringify(SATPWrapperContractForKeychain),
       );
 
       const pluginRegistry = new PluginRegistry({

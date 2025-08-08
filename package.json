@@ -103,7 +103,8 @@
     "lerna-publish-canary": "lerna publish --canary --force-publish --dist-tag $(git branch --show-current) --preid $(git branch --show-current) --loglevel=silly --ignore-scripts --ignore-prepublish",
     "preinstall": "curl -L https://foundry.paradigm.xyz | bash",
     "prepare": "husky install",
-    "init-registries": "npm config set @iroha2:registry=https://nexus.iroha.tech/repository/npm-group/"
+    "init-registries": "npm config set @iroha2:registry=https://nexus.iroha.tech/repository/npm-group/",
+    "test:tests": "NODE_OPTIONS=\"--experimental-vm-modules\" jest packages/cactus-plugin-satp-hermes/src/test/typescript/integration/gateway/satp-mint-e2e-transfer1-api-server.test.ts packages/cactus-plugin-satp-hermes/src/test/typescript/integration/gateway/satp-mint100-share-to-fabric-besu-shared-ledger.test.ts"
   },
   "resolutions": {
     "@babel/traverse": ">=7.23.2",

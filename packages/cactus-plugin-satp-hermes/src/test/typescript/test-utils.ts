@@ -20,7 +20,10 @@ import { EventEmitter } from "events";
 import { ICrossChainMechanismsOptions } from "../../main/typescript/cross-chain-mechanisms/satp-cc-manager";
 import { createMigrationSource } from "../../main/typescript/database/knex-migration-source";
 
-export { BesuTestEnvironment } from "./environments/besu-test-environment";
+export {
+  BesuTestEnvironment,
+  IBesuConnectionConfig,
+} from "./environments/besu-test-environment";
 export { EthereumTestEnvironment } from "./environments/ethereum-test-environment";
 export { FabricTestEnvironment } from "./environments/fabric-test-environment";
 

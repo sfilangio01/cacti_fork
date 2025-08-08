@@ -35,6 +35,7 @@ import { LogLevelDesc, LoggerProvider } from "@hyperledger/cactus-common";
 import { Knex, knex } from "knex";
 import { create } from "@bufbuild/protobuf";
 import { stringify as safeStableStringify } from "safe-stable-stringify";
+import * as fs from "fs-extra";
 import {
   Type,
   MessageStagesHashesSchema,
@@ -45,6 +46,9 @@ import { FabricFungibleAsset } from "../../../../main/typescript/cross-chain-mec
 import { BesuLeaf } from "../../../../main/typescript/cross-chain-mechanisms/bridge/leafs/besu-leaf";
 import { FabricLeaf } from "../../../../main/typescript/cross-chain-mechanisms/bridge/leafs/fabric-leaf";
 import path from "path";
+import { IBesuConnectionConfig } from "../../environments/besu-test-environment";
+import { IFabricConnectionConfig } from "../../environments/fabric-test-environment";
+import { IEthereumConnectionConfig } from "../../environments/ethereum-test-environment";
 import { OntologyManager } from "../../../../main/typescript/cross-chain-mechanisms/bridge/ontology/ontology-manager";
 import { EvmFungibleAsset } from "../../../../main/typescript/cross-chain-mechanisms/bridge/ontology/assets/evm-asset";
 import { PluginRegistry } from "@hyperledger/cactus-core";
@@ -77,6 +81,12 @@ const log = LoggerProvider.getOrCreate({
   level: logLevel,
   label: "Rollback-stage-0",
 });
+
+interface ICombinedLedgerConfigs {
+  besu: IBesuConnectionConfig;
+  fabric: IFabricConnectionConfig;
+  ethereum: IEthereumConnectionConfig;
+}
 
 // mock stage-0 rollback
 const createMockSession = (
@@ -150,45 +160,38 @@ const createMockSession = (
 };
 
 beforeAll(async () => {
-  pruneDockerAllIfGithubAction({ logLevel })
-    .then(() => {
-      log.info("Pruning throw OK");
-    })
-    .catch(async () => {
-      await Containers.logDiagnostics({ logLevel });
-      fail("Pruning didn't throw OK");
-    });
-
-  {
-    const ontologiesPath = path.join(__dirname, "../../../ontologies");
-
-    ontologyManager = new OntologyManager({
-      logLevel,
-      ontologiesPath: ontologiesPath,
-    });
-
-    const satpContractName = "satp-contract";
-    fabricEnv = await FabricTestEnvironment.setupTestEnvironment({
-      contractName: satpContractName,
-      logLevel,
-      claimFormat: ClaimFormat.DEFAULT,
-    });
-    log.info("Fabric Ledger started successfully");
-
-    await fabricEnv.deployAndSetupContracts();
+  const configPath = process.env.TEST_ENV_CONFIG_PATH;
+  if (!configPath) {
+    throw new Error(
+      "TEST_ENV_CONFIG_PATH environment variable not set. Global setup likely failed or wasn't run.",
+    );
   }
 
-  {
-    const erc20TokenContract = "SATPContract";
+  const ontologiesPath = path.join(__dirname, "../../../ontologies");
 
-    besuEnv = await BesuTestEnvironment.setupTestEnvironment({
-      contractName: erc20TokenContract,
-      logLevel,
-    });
-    log.info("Besu Ledger started successfully");
+  ontologyManager = new OntologyManager({
+    logLevel,
+    ontologiesPath: ontologiesPath,
+  });
 
-    await besuEnv.deployAndSetupContracts(ClaimFormat.DEFAULT);
-  }
+  const loadedLedgerConfigs: ICombinedLedgerConfigs =
+    await fs.readJson(configPath);
+  log.info(`Loaded ledger configurations from ${configPath}`); // Connect to existing Besu, Fabric, and Ethereum environments
+
+  besuEnv = await BesuTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.besu,
+  );
+  log.info("Connected to existing Besu Ledger successfully.");
+
+  fabricEnv = await FabricTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.fabric,
+  );
+  log.info("Connected to existing Fabric Ledger successfully."); // Connect to existing Ethereum environment
+
+  await besuEnv.deployAndSetupContracts(ClaimFormat.BUNGEE);
+  log.info("Besu contracts deployed and setup successfully.");
+  await fabricEnv.deployAndSetupContracts();
+  log.info(`Fabric SATP contracts deployed and initialized.`);
 
   fabricLeaf = new FabricLeaf(
     fabricEnv.createFabricLeafConfig(ontologyManager, "DEBUG"),
@@ -227,14 +230,6 @@ afterAll(async () => {
   await besuEnv.tearDown();
   await fabricEnv.tearDown();
 
-  await pruneDockerAllIfGithubAction({ logLevel })
-    .then(() => {
-      log.info("Pruning throw OK");
-    })
-    .catch(async () => {
-      await Containers.logDiagnostics({ logLevel });
-      fail("Pruning didn't throw OK");
-    });
 });
 
 describe.skip("Rollback Test stage 0", () => {

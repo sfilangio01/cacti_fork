@@ -1,14 +1,23 @@
 import "jest-extended";
 import { LogLevelDesc, LoggerProvider } from "@hyperledger/cactus-common";
 import {
-  pruneDockerAllIfGithubAction,
-  Containers,
-} from "@hyperledger/cactus-test-tooling";
+  BesuTestEnvironment,
+  FabricTestEnvironment,
+  EthereumTestEnvironment,
+  getTransactRequest,
+} from "../../test-utils";
+import { IBesuConnectionConfig } from "../../environments/besu-test-environment";
+import { IFabricConnectionConfig } from "../../environments/fabric-test-environment";
+import { IEthereumConnectionConfig } from "../../environments/ethereum-test-environment";
+import * as fs from "fs-extra";
+import { v4 as uuidv4 } from "uuid";
+import "jest-extended";
 import {
   SATPGatewayConfig,
   SATPGateway,
   PluginFactorySATPGateway,
   TokenType,
+  ClaimFormat,
 } from "../../../../main/typescript";
 import {
   Address,
@@ -18,13 +27,6 @@ import {
   IPluginFactoryOptions,
   PluginImportType,
 } from "@hyperledger/cactus-core-api";
-import { ClaimFormat } from "../../../../main/typescript/generated/proto/cacti/satp/v02/common/message_pb";
-import {
-  BesuTestEnvironment,
-  EthereumTestEnvironment,
-  FabricTestEnvironment,
-  getTransactRequest,
-} from "../../test-utils";
 import {
   SATP_ARCHITECTURE_VERSION,
   SATP_CORE_VERSION,
@@ -32,42 +34,73 @@ import {
 } from "../../../../main/typescript/core/constants";
 import { Knex, knex } from "knex";
 import { PluginRegistry } from "@hyperledger/cactus-core";
-import { v4 as uuidv4 } from "uuid";
 import path from "path";
 import { createMigrationSource } from "../../../../main/typescript/database/knex-migration-source";
 import { knexLocalInstance } from "../../../../main/typescript/database/knexfile";
 import { knexRemoteInstance } from "../../../../main/typescript/database/knexfile-remote";
 
-const logLevel: LogLevelDesc = "DEBUG";
+const LOG_LEVEL: LogLevelDesc = "DEBUG";
 const log = LoggerProvider.getOrCreate({
-  level: logLevel,
-  label: "SATP - Hermes",
+  level: LOG_LEVEL,
+  label: "SATP - Integration Test",
 });
 
-let knexSourceRemoteClient: Knex;
-let knexLocalClient: Knex;
-let fabricEnv: FabricTestEnvironment;
+const TIMEOUT = 900000; // 15 minutes for tests
+
 let besuEnv: BesuTestEnvironment;
+let fabricEnv: FabricTestEnvironment;
 let ethereumEnv: EthereumTestEnvironment;
 let gateway: SATPGateway;
+let knexSourceRemoteClient: Knex;
+let knexLocalClient: Knex;
 
-const TIMEOUT = 900000; // 15 minutes
+/**
+ * Interface representing the combined ledger configurations loaded from a temporary file.
+ */
+interface ICombinedLedgerConfigs {
+  besu: IBesuConnectionConfig;
+  fabric: IFabricConnectionConfig;
+  ethereum: IEthereumConnectionConfig;
+}
 
-afterAll(async () => {
-  await gateway.shutdown();
-  await besuEnv.tearDown();
-  await fabricEnv.tearDown();
+/**
+ * Global setup for this test file: Connects to the already running ledgers and SATP Gateway.
+ * This runs once before any tests in this file.
+ */
+beforeAll(async () => {
+  const configPath = process.env.TEST_ENV_CONFIG_PATH;
+  if (!configPath) {
+    throw new Error(
+      "TEST_ENV_CONFIG_PATH environment variable not set. Global setup likely failed or wasn't run.",
+    );
+  }
 
-  await pruneDockerAllIfGithubAction({ logLevel })
-    .then(() => {
-      log.info("Pruning throw OK");
-    })
-    .catch(async () => {
-      await Containers.logDiagnostics({ logLevel });
-      fail("Pruning didn't throw OK");
-    });
+  const loadedLedgerConfigs: ICombinedLedgerConfigs =
+    await fs.readJson(configPath);
+  log.info(`Loaded ledger configurations from ${configPath}`); // Connect to existing Besu, Fabric, and Ethereum environments
+
+  besuEnv = await BesuTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.besu,
+  );
+  log.info("Connected to existing Besu Ledger successfully.");
+
+  fabricEnv = await FabricTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.fabric,
+  );
+  log.info("Connected to existing Fabric Ledger successfully."); // Connect to existing Ethereum environment
+
+  ethereumEnv = await EthereumTestEnvironment.connectToExistingEnvironment(
+    loadedLedgerConfigs.ethereum,
+  );
+  log.info("Connected to existing Ethereum Ledger successfully."); // Access the globally initialized SATP Gateway instance
+
+  await besuEnv.deployAndSetupContracts(ClaimFormat.BUNGEE);
+  log.info("Besu contracts deployed and setup successfully.");
+  await ethereumEnv.deployAndSetupContracts(ClaimFormat.BUNGEE);
+  log.info("Ethereum contracts deployed and setup successfully.");
+  await fabricEnv.deployAndSetupContracts();
+  log.info(`Fabric SATP contracts deployed and initialized.`);
 }, TIMEOUT);
-
 afterEach(async () => {
   if (gateway) {
     await gateway.shutdown();
@@ -79,50 +112,6 @@ afterEach(async () => {
     await knexSourceRemoteClient.destroy();
   }
 }, TIMEOUT);
-
-beforeAll(async () => {
-  pruneDockerAllIfGithubAction({ logLevel })
-    .then(() => {
-      log.info("Pruning throw OK");
-    })
-    .catch(async () => {
-      await Containers.logDiagnostics({ logLevel });
-      fail("Pruning didn't throw OK");
-    });
-
-  {
-    const satpContractName = "satp-contract";
-    fabricEnv = await FabricTestEnvironment.setupTestEnvironment({
-      contractName: satpContractName,
-      logLevel,
-      claimFormat: ClaimFormat.BUNGEE,
-    });
-    log.info("Fabric Ledger started successfully");
-
-    await fabricEnv.deployAndSetupContracts();
-  }
-
-  {
-    const erc20TokenContract = "SATPContract";
-    besuEnv = await BesuTestEnvironment.setupTestEnvironment({
-      contractName: erc20TokenContract,
-      logLevel,
-    });
-    log.info("Besu Ledger started successfully");
-
-    await besuEnv.deployAndSetupContracts(ClaimFormat.BUNGEE);
-  }
-  {
-    const erc20TokenContract = "SATPContract";
-    ethereumEnv = await EthereumTestEnvironment.setupTestEnvironment({
-      contractName: erc20TokenContract,
-      logLevel,
-    });
-    log.info("Ethereum Ledger started successfully");
-    await ethereumEnv.deployAndSetupContracts(ClaimFormat.BUNGEE);
-  }
-}, TIMEOUT);
-
 describe("SATPGateway sending a token from Besu to Fabric", () => {
   jest.setTimeout(TIMEOUT);
   it("should mint 100 tokens to the owner account", async () => {

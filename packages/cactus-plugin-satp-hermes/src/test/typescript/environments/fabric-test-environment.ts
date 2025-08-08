@@ -713,117 +713,318 @@ export class FabricTestEnvironment {
     this.log.info(`SATPWrapper.Approve(): ${JSON.stringify(response)}`);
   }
 
-  /**
-   * Deploys a specific smart contract and performs initial setup for it.
-   * This method will be called by global setup for each chaincode to deploy.
-   * @param chaincodeName The name of the chaincode to deploy.
-   * @param chaincodePath The relative path to the chaincode source directory.
-   * @param chaincodeVersion The version of the chaincode.
-   * @param chaincodeLang The programming language of the chaincode.
-   */
-  public async deployAndSetupChaincode(
-    chaincodeName: string,
-    chaincodePath: string,
-    chaincodeVersion: string = "1.0.0",
-    chaincodeLang: ChainCodeProgrammingLanguage = ChainCodeProgrammingLanguage.Typescript,
-  ) {
-    this.satpContractName = chaincodeName;
-    const contractDir = path.join(__dirname, chaincodePath);
+  public async deployAndSetupContracts() {
+    this.satpContractName = "satp-contract" + uuidv4();
+    const satpContractRelPath =
+      "./../fabric/contracts/satp-contract/chaincode-typescript";
+    const satpContractDir = path.join(__dirname, satpContractRelPath);
 
-    const getSourceFiles = async (dir: string): Promise<FileBase64[]> => {
-      const files: FileBase64[] = [];
-      const entries = await fs.readdir(dir, { withFileTypes: true });
+    // ├── package.json
+    // ├── src
+    // │   ├── index.ts
+    // │   ├── ITraceableContract.ts
+    // │   ├── satp-contract-interface.ts
+    // │   ├── satp-contract.ts
+    // ├── tsconfig.json
+    // ├── lib
+    // │   └── tokenERC20.js
+    // --------
+    const satpSourceFiles: FileBase64[] = [];
+    {
+      const filename = "./tsconfig.json";
+      const relativePath = "./";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      satpSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
+    {
+      const filename = "./package.json";
+      const relativePath = "./";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      satpSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
+    {
+      const filename = "./index.ts";
+      const relativePath = "./src/";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      satpSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
+    {
+      const filename = "./ITraceableContract.ts";
+      const relativePath = "./src/";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      satpSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
+    {
+      const filename = "./satp-contract-interface.ts";
+      const relativePath = "./src/";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      satpSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
+    {
+      const filename = "./satp-contract.ts";
+      const relativePath = "./src/";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      satpSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
+    {
+      const filename = "./tokenERC20.ts";
+      const relativePath = "./src/";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      satpSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
 
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        const relativePath = path.relative(contractDir, fullPath);
-
-        if (entry.isDirectory()) {
-          files.push(...(await getSourceFiles(fullPath)));
-        } else if (entry.isFile()) {
-          const buffer = await fs.readFile(fullPath);
-          files.push({
-            body: buffer.toString("base64"),
-            filepath: path.dirname(relativePath),
-            filename: entry.name,
-          });
-        }
-      }
-      return files;
-    };
-
-    const sourceFiles = await getSourceFiles(contractDir);
-
-    this.log.info(`Deploying chaincode: ${chaincodeName} from ${contractDir}`);
     const res = await this.connector.deployContract({
       channelId: this.fabricChannelName,
-      ccVersion: chaincodeVersion,
-      sourceFiles: sourceFiles,
-      ccName: chaincodeName,
+      ccVersion: "1.0.0",
+      sourceFiles: satpSourceFiles,
+      ccName: this.satpContractName,
       targetOrganizations: [
         FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
         FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_2,
       ],
       caFile:
         FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1.ORDERER_TLS_ROOTCERT_FILE,
-      ccLabel: chaincodeName,
-      ccLang: chaincodeLang,
+      ccLabel: "satp-contract",
+      ccLang: ChainCodeProgrammingLanguage.Typescript,
       ccSequence: 1,
       orderer: "orderer.example.com:7050",
       ordererTLSHostnameOverride: "orderer.example.com",
       connTimeout: 60,
     });
 
-    const { success, lifecycle } = res;
-    assert.ok(success, "Deployment success expected to be true");
-    assert.ok(lifecycle, "Lifecycle must not be undefined");
+    const { packageIds, lifecycle, success } = res;
+    expect(success).toBe(true);
+    expect(lifecycle).not.toBeUndefined();
 
-    this.log.info(`Chaincode ${chaincodeName} deployed successfully.`);
+    const {
+      approveForMyOrgList,
+      installList,
+      queryInstalledList,
+      commit,
+      packaging,
+      queryCommitted,
+    } = lifecycle;
 
-    // Perform initial setup based on chaincode name
-    if (chaincodeName === "satp-contract") {
-      const initializeResponse = await this.connector.transact({
-        contractName: chaincodeName,
-        channelName: this.fabricChannelName,
-        params: [
-          this.userIdentity.mspId,
-          FabricTestEnvironment.FABRIC_ASSET_ID,
-        ],
-        methodName: "InitToken",
-        invocationType: FabricContractInvocationType.Send,
-        signingCredential: this.fabricSigningCredential,
-      });
-      assert.ok(initializeResponse, "InitToken response must not be undefined");
-      this.log.info(
-        `SATPContract.InitToken(): ${JSON.stringify(initializeResponse)}`,
-      );
+    expect(packageIds).toBeTruthy();
+    expect(Array.isArray(packageIds)).toBe(true);
 
-      const responseClientId = await this.connector.transact({
-        contractName: chaincodeName,
-        channelName: this.fabricChannelName,
-        params: [],
-        methodName: "ClientAccountID",
-        invocationType: FabricContractInvocationType.Call,
-        signingCredential: this.fabricSigningCredential,
+    expect(approveForMyOrgList).toBeTruthy();
+    expect(Array.isArray(approveForMyOrgList)).toBe(true);
+
+    expect(installList).toBeTruthy();
+    expect(Array.isArray(installList)).toBe(true);
+    expect(queryInstalledList).toBeTruthy();
+    expect(Array.isArray(queryInstalledList)).toBe(true);
+
+    expect(commit).toBeTruthy();
+    expect(packaging).toBeTruthy();
+    expect(queryCommitted).toBeTruthy();
+    this.log.info("SATP Contract deployed");
+
+    const initializeResponse = await this.connector.transact({
+      contractName: this.satpContractName,
+      channelName: this.fabricChannelName,
+      params: [this.userIdentity.mspId, FabricTestEnvironment.FABRIC_ASSET_ID],
+      methodName: "InitToken",
+      invocationType: FabricContractInvocationType.Send,
+      signingCredential: this.fabricSigningCredential,
+    });
+
+    expect(initializeResponse).not.toBeUndefined();
+
+    this.log.info(
+      `SATPContract.InitToken(): ${JSON.stringify(initializeResponse)}`,
+    );
+
+    if (this.bridgeMSPID === undefined) {
+      throw new Error("Bridge MSPID is undefined");
+    }
+
+    const responseClientId = await this.connector.transact({
+      contractName: this.satpContractName,
+      channelName: this.fabricChannelName,
+      params: [],
+      methodName: "ClientAccountID",
+      invocationType: FabricContractInvocationType.Send,
+      signingCredential: this.fabricSigningCredential,
+    });
+
+    this.clientId = responseClientId.functionOutput.toString();
+  }
+
+  public async deployAndSetupOracleContracts() {
+    this.satpContractName = "oracle-bl-contract" + uuidv4();
+    const satpContractRelPath =
+      "./../fabric/contracts/oracle-bl-contract/chaincode-typescript";
+    const satpContractDir = path.join(__dirname, satpContractRelPath);
+
+    // ├── package.json
+    // ├── src
+    // │   ├── index.ts
+    // │   ├── ITraceableContract.ts
+    // │   ├── satp-contract-interface.ts
+    // │   ├── satp-contract.ts
+    // ├── tsconfig.json
+    // ├── lib
+    // │   └── tokenERC20.js
+    // --------
+    const oracleSourceFiles: FileBase64[] = [];
+    {
+      const filename = "./tsconfig.json";
+      const relativePath = "./";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      oracleSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
       });
-      this.clientId = responseClientId.functionOutput.toString();
-      this.log.info(`Client ID obtained: ${this.clientId}`);
-    } else if (chaincodeName === "oracle-bl-contract") {
-      const initializeResponse = await this.connector.transact({
-        contractName: chaincodeName,
-        channelName: this.fabricChannelName,
-        params: [],
-        methodName: "InitLedger",
-        invocationType: FabricContractInvocationType.Send,
-        signingCredential: this.fabricSigningCredential,
+    }
+    {
+      const filename = "./package.json";
+      const relativePath = "./";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      oracleSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
       });
-      assert.ok(
-        initializeResponse,
-        "InitLedger response must not be undefined",
-      );
-      this.log.info(
-        `OracleBLContract.InitLedger(): ${JSON.stringify(initializeResponse)}`,
-      );
+    }
+    {
+      const filename = "./index.ts";
+      const relativePath = "./src/";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      oracleSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
+    {
+      const filename = "./data.ts";
+      const relativePath = "./src/";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      oracleSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
+    {
+      const filename = "./oracleBusinessLogic.ts";
+      const relativePath = "./src/";
+      const filePath = path.join(satpContractDir, relativePath, filename);
+      const buffer = await fs.readFile(filePath);
+      oracleSourceFiles.push({
+        body: buffer.toString("base64"),
+        filepath: relativePath,
+        filename,
+      });
+    }
+
+    const res = await this.connector.deployContract({
+      channelId: this.fabricChannelName,
+      ccVersion: "1.0.0",
+      sourceFiles: oracleSourceFiles,
+      ccName: this.satpContractName,
+      targetOrganizations: [
+        FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1,
+        FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_2,
+      ],
+      caFile:
+        FABRIC_25_LTS_FABRIC_SAMPLES_ENV_INFO_ORG_1.ORDERER_TLS_ROOTCERT_FILE,
+      ccLabel: "oracle-bl-contract",
+      ccLang: ChainCodeProgrammingLanguage.Typescript,
+      ccSequence: 1,
+      orderer: "orderer.example.com:7050",
+      ordererTLSHostnameOverride: "orderer.example.com",
+      connTimeout: 60,
+    });
+
+    const { packageIds, lifecycle, success } = res;
+    expect(success).toBe(true);
+    expect(lifecycle).not.toBeUndefined();
+
+    const {
+      approveForMyOrgList,
+      installList,
+      queryInstalledList,
+      commit,
+      packaging,
+      queryCommitted,
+    } = lifecycle;
+
+    expect(packageIds).toBeTruthy();
+    expect(Array.isArray(packageIds)).toBe(true);
+
+    expect(approveForMyOrgList).toBeTruthy();
+    expect(Array.isArray(approveForMyOrgList)).toBe(true);
+
+    expect(installList).toBeTruthy();
+    expect(Array.isArray(installList)).toBe(true);
+    expect(queryInstalledList).toBeTruthy();
+    expect(Array.isArray(queryInstalledList)).toBe(true);
+
+    expect(commit).toBeTruthy();
+    expect(packaging).toBeTruthy();
+    expect(queryCommitted).toBeTruthy();
+    this.log.info("Oracle Business Logic Contract deployed");
+
+    const initializeResponse = await this.connector.transact({
+      contractName: "oracle-bl-contract",
+      channelName: this.fabricChannelName,
+      params: [],
+      methodName: "InitLedger",
+      invocationType: FabricContractInvocationType.Send,
+      signingCredential: this.fabricSigningCredential,
+    });
+
+    expect(initializeResponse).not.toBeUndefined();
+
+    this.log.info(
+      `OracleBLContract.InitLedger(): ${JSON.stringify(initializeResponse)}`,
+    );
+
+    if (this.bridgeMSPID === undefined) {
+      throw new Error("Bridge MSPID is undefined");
     }
   }
 

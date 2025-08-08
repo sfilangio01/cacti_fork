@@ -62,8 +62,14 @@ export class SATPBridgeExecutionLayerImpl implements SATPBridgeExecutionLayer {
     this.log = LoggerProvider.getOrCreate({ label, level: this.logLevel });
 
     this.claimType = options.claimType || ClaimFormat.DEFAULT;
+    this.log.info(`${label} initialized with claim type: ${this.claimType}`);
+    this.log.info(
+      "Supported claim formats: ",
+      options.leafBridge.getSupportedClaimFormats(),
+    );
 
-    if (!(this.claimType in options.leafBridge.getSupportedClaimFormats())) {
+    const supportedClaimFormats = options.leafBridge.getSupportedClaimFormats();
+    if (!supportedClaimFormats.includes(this.claimType)) {
       throw new ClaimFormatError("Claim not supported by the bridge");
     }
     this.bridgeEndPoint = options.leafBridge;
