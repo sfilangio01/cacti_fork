@@ -4,6 +4,7 @@ import {
   pruneDockerAllIfGithubAction,
   Containers,
 } from "@hyperledger/cactus-test-tooling";
+
 import {
   SATPGatewayConfig,
   SATPGateway,

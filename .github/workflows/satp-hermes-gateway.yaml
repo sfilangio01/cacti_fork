@@ -1,18 +1,17 @@
-name: SATP-Hermes Gateway CI/CD
+# SATP-Hermes Gateway tests and docker deployments
+name: SATP CI - tests and docker deployments
 
-# Continuous Integration pipeline for the SATP (Secure Asset Transfer Protocol) Hermes Gateway.
-# This workflow orchestrates a comprehensive build, test, and deployment process:
-# 
-# - Builds all monorepo dependencies and generates protocol artifacts (protobuf, OpenAPI, Solidity)
-# - Runs comprehensive test suites including unit tests and integration tests across multiple scenarios
-# - Validates code quality through linting and static analysis
-# - Creates deployable Docker images and publishes them to container registries
-# - Supports multiple deployment environments (main, dev, staging) with appropriate tagging
+# This workflow handles the CI/CD pipeline for the SATP Hermes Gateway plugin.
+# It performs the following tasks:
+# 1. Builds the SATP plugin bundle and generates necessary files
+# 2. Runs unit, integration, and forge (smart contract) tests
+# 3. Builds and pushes Docker images to both Docker Hub and GHCR
+# 4. Tags images appropriately (version-specific and latest)
 
+# Necessary for the test runner reports 
 permissions:
-  contents: write  # Required for test result publishing
-  checks: write    # Required for test result reports
-
+  contents: write
+  checks: write
 env:
   NODEJS_VERSION: v22.18.0
 
@@ -112,17 +111,25 @@ jobs:
             echo "No package .yarn found, skipping upload"
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Upload package .yarn cache artifact (fallback)
-        if: steps.upload_yarn_cache_package.outputs.found == 'true'
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: satp-hermes-build-output
+          path: packages/cactus-plugin-satp-hermes/dist/
+      - name: Upload .yarn cache
         uses: actions/upload-artifact@v4
         with:
           name: satp-hermes-yarn-cache
-          path: packages/cactus-plugin-satp-hermes/.yarn/
+          path: ./.yarn/
+      - name: Upload node_modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: satp-hermes-node-modules
+          path: node_modules/
 
-  # Code generation job: generates protobuf, OpenAPI SDKs, and Solidity artifacts
-  codegen-satp: 
-    needs: [build-satp, lint-satp]
+# We could cache the artefacts but we found out it is quicker to re-run install and configure
+  yarn-code-gen: 
+    needs: build-satp-dev
     runs-on: ubuntu-22.04
     continue-on-error: false
     env:
@@ -336,22 +343,17 @@ jobs:
           name: satp-unit-junit-report
           path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-unit.xml
 
-      - name: Check for SATP unit coverage artifacts
-        id: check_unit_coverage
-        run: |
-          if [ -d packages/cactus-plugin-satp-hermes/code-coverage-ts ] || [ -f packages/cactus-plugin-satp-hermes/coverage/coverage-final.json ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload SATP unit coverage (if present)
-        if: steps.check_unit_coverage.outputs.found == 'true'
-        uses: actions/upload-artifact@v4
+      - name: Render SATP unit test summary
+        uses: dorny/test-reporter@v1.9.1
+        if: always()
         with:
-          name: coverage-reports-satp-hermes
-          path: |
-            packages/cactus-plugin-satp-hermes/code-coverage-ts/**/
+          name: SATP Unit Tests
+          path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-unit.xml
+          reporter: jest-junit
+          list-tests: failed
+          list-suites: failed
+          max-annotations: 10
+          fail-on-empty: true
       
   run-satp-tests-integration-bridge:
     needs: [build-satp, codegen-satp]
@@ -406,23 +408,17 @@ jobs:
           name: satp-integration-junit-report-bridge
           path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-integration-bridge.xml
 
-      - name: Check for SATP bridge integration coverage artifacts
-        id: check_bridge_coverage
-        run: |
-          if [ -d packages/cactus-plugin-satp-hermes/code-coverage-ts ] || [ -f packages/cactus-plugin-satp-hermes/coverage/coverage-final.json ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload SATP integration coverage - bridge (if present)
-        if: steps.check_bridge_coverage.outputs.found == 'true'
-        uses: actions/upload-artifact@v4
+      - name: Render SATP integration test summary - bridge
+        uses: dorny/test-reporter@v1.9.1
+        if: always()
         with:
           name: SATP Integration Tests (Bridge)
           path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-integration-bridge.xml
           reporter: jest-junit
           list-tests: failed
+          list-suites: failed
+          max-annotations: 10
+          fail-on-empty: true
 
   run-satp-tests-integration-oracle:
     needs: [build-satp, codegen-satp]
@@ -478,25 +474,18 @@ jobs:
         with:
           name: satp-integration-junit-report-oracle
           path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-integration-oracle.xml
-
-      - name: Check for SATP oracle integration coverage artifacts
-        id: check_oracle_coverage
-        run: |
-          if [ -d packages/cactus-plugin-satp-hermes/code-coverage-ts ] || [ -f packages/cactus-plugin-satp-hermes/coverage/coverage-final.json ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload SATP integration coverage - oracle (if present)
-        if: steps.check_oracle_coverage.outputs.found == 'true'
-        uses: actions/upload-artifact@v4
+          
+      - name: Render SATP integration test summary - oracle
+        uses: dorny/test-reporter@v1.9.1
+        if: always()
         with:
-          name: coverage-reports-satp-hermes
-          path: |
-            packages/cactus-plugin-satp-hermes/code-coverage-ts/**/
-            packages/cactus-plugin-satp-hermes/coverage/**/
-          # list-suites: failed
+          name: SATP Integration Tests (Oracle)
+          path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-integration-oracle.xml
+          reporter: jest-junit
+          list-tests: failed
+          list-suites: failed
+          max-annotations: 10
+          fail-on-empty: true
 
   run-satp-tests-integration-gateway:
     needs: [build-satp, codegen-satp]
@@ -553,27 +542,21 @@ jobs:
           name: satp-integration-junit-report-gateway
           path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-integration-gateway.xml
 
-      - name: Check for SATP gateway integration coverage artifacts
-        id: check_gateway_coverage
-        run: |
-          if [ -d packages/cactus-plugin-satp-hermes/code-coverage-ts ] || [ -f packages/cactus-plugin-satp-hermes/coverage/coverage-final.json ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload SATP integration coverage - gateway (if present)
-        if: steps.check_gateway_coverage.outputs.found == 'true'
-        uses: actions/upload-artifact@v4
+      - name: Render SATP integration test summary - gateway
+        uses: dorny/test-reporter@v1.9.1
+        if: always()
         with:
-          name: coverage-reports-satp-hermes
-          path: |
-            packages/cactus-plugin-satp-hermes/code-coverage-ts/**/
-
+          name: SATP Integration Tests (Gateway)
+          path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-integration-gateway.xml
+          reporter: jest-junit
+          list-tests: failed
+          list-suites: failed
+          max-annotations: 10
+          fail-on-empty: true
   # TODO change this job to run docker tests with docker version built on current pipeline
   # this can be achieved by allowing the docker tests to receive an ENV variable with docker tag (uses defaults)
   run-satp-tests-integration-docker:
-    needs: [build-satp, codegen-satp]
+    needs: build-satp-dev
     runs-on: ubuntu-22.04
     env:
       FULL_BUILD_DISABLED: true
@@ -627,34 +610,17 @@ jobs:
           name: satp-integration-junit-report-docker
           path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-integration-docker.xml
 
-      - name: Check for SATP docker integration coverage artifacts
-        id: check_docker_coverage
-        run: |
-          if [ -d packages/cactus-plugin-satp-hermes/code-coverage-ts ] || [ -f packages/cactus-plugin-satp-hermes/coverage/coverage-final.json ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload SATP integration coverage - docker (always attempt)
+      - name: Render SATP integration test summary
+        uses: dorny/test-reporter@v1.9.1
         if: always()
-        run: |
-          if [ -d packages/cactus-plugin-satp-hermes/code-coverage-ts ] || [ -f packages/cactus-plugin-satp-hermes/coverage/coverage-final.json ]; then
-            echo "Uploading coverage artifacts"
-            mkdir -p ./coverage-upload || true
-            cp -r packages/cactus-plugin-satp-hermes/code-coverage-ts ./coverage-upload/ 2>/dev/null || true
-            cp -r packages/cactus-plugin-satp-hermes/coverage ./coverage-upload/ 2>/dev/null || true
-            cp -r packages/cactus-plugin-satp-hermes/reports/junit ./coverage-upload/ 2>/dev/null || true
-          else
-            echo "No coverage artifacts found to upload"
-          fi
-
-      - name: Upload SATP integration coverage - docker artifact
-        if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: coverage-reports-satp-hermes
-          path: ./coverage-upload/
+          name: SATP Integration Tests (Docker)
+          path: packages/cactus-plugin-satp-hermes/reports/junit/satp-hermes-tests-integration-docker.xml
+          reporter: jest-junit
+          list-tests: failed
+          list-suites: failed
+          max-annotations: 10
+          fail-on-empty: true
 
   run-satp-tests-integration-cbdc:
     needs: [build-satp, codegen-satp]
@@ -694,16 +660,8 @@ jobs:
       - name: Configure and build all packages
         run: yarn configure
 
-      - name: Run CBDC integration tests (with optional coverage)
-        run: |
-          set -euo pipefail
-          if [ "${{ env.RUN_CODE_COVERAGE }}" = "true" ]; then
-            echo "Running CBDC integration tests with coverage"
-            yarn workspace @hyperledger/cactus-example-cbdc-bridging-backend test:integration --coverage --coverageDirectory=./code-coverage-ts/satp-hermes-cbdc || true
-          else
-            echo "Running CBDC integration tests without coverage"
-            yarn workspace @hyperledger/cactus-example-cbdc-bridging-backend test:integration
-          fi
+      - name: Run CBDC integration tests
+        run: yarn workspace @hyperledger/cactus-example-cbdc-bridging-backend test:integration
 
       - name: Upload CBDC integration test report
         uses: actions/upload-artifact@v4
@@ -711,68 +669,61 @@ jobs:
           name: cbdc-integration-junit-report
           path: examples/cactus-example-cbdc-bridging-backend/reports/junit/cbdc-bridging-tests-integration.xml
 
-      - name: Check for CBDC integration coverage artifacts
-        id: check_cbdc_coverage
-        run: |
-          if [ -d packages/cactus-plugin-satp-hermes/code-coverage-ts ] || [ -f packages/cactus-plugin-satp-hermes/coverage/coverage-final.json ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload CBDC integration coverage (if present)
-        if: steps.check_cbdc_coverage.outputs.found == 'true'
-        uses: actions/upload-artifact@v4
+      - name: Render CBDC integration test summary
+        uses: dorny/test-reporter@v1.9.1
+        if: always()
         with:
-          name: coverage-reports-satp-hermes
-          path: |
-            packages/cactus-plugin-satp-hermes/code-coverage-ts/**/
+          name: CBDC Integration Tests
+          path: examples/cactus-example-cbdc-bridging-backend/reports/junit/cbdc-bridging-tests-integration.xml
+          reporter: jest-junit
+          list-tests: failed
+          list-suites: failed
+          max-annotations: 10
+          fail-on-empty: true
 
-  # Run after all tests, collect reports, render summary and aggregate coverage
-  test-aggregator:
+  # Run after all tests and summarize results
+  run-all-tests:
     needs: [run-satp-tests-unit, run-satp-tests-integration-bridge, run-satp-tests-integration-oracle, run-satp-tests-integration-gateway, run-satp-tests-integration-cbdc, run-satp-tests-integration-docker]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4.1.7
-
-      # Download JUnit test reports uploaded by test jobs
+      
       - name: Download SATP unit test report
         uses: actions/download-artifact@v4
         with:
           name: satp-unit-junit-report
           path: ./test-reports/
-
+          
       - name: Download SATP integration test report - bridge
         uses: actions/download-artifact@v4
         with:
           name: satp-integration-junit-report-bridge
           path: ./test-reports/
-
+          
       - name: Download SATP integration test report - oracle
         uses: actions/download-artifact@v4
         with:
           name: satp-integration-junit-report-oracle
           path: ./test-reports/
-
+          
       - name: Download SATP integration test report - gateway
         uses: actions/download-artifact@v4
         with:
           name: satp-integration-junit-report-gateway
           path: ./test-reports/
-
+          
       - name: Download CBDC integration test report
         uses: actions/download-artifact@v4
         with:
           name: cbdc-integration-junit-report
           path: ./test-reports/
-
+          
       - name: Download SATP integration test report - docker
         uses: actions/download-artifact@v4
         with:
           name: satp-integration-junit-report-docker
           path: ./test-reports/
-
-      # Render combined test report summary (always run)
+          
       - name: Render All Test Reports Summary
         uses: dorny/test-reporter@v1.9.1
         if: always()
@@ -782,11 +733,16 @@ jobs:
           reporter: jest-junit
           list-tests: all
           list-suites: all
-          max-annotations: 10
+          max-annotations: 50
+          
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "📋 All tests completed!"
 
   # Set Docker tags based on branch and commit information
   set-docker-tags:
-    needs: [build-satp, test-aggregator] 
+    needs: [build-bundle] 
     if: |
         (github.event_name == 'push' && 
         (github.ref == 'refs/heads/main' || 
@@ -841,7 +797,35 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4.1.7
-
+      - name: Debug Build Info
+        run: |
+          {
+            echo "Debug: Building for tag version = ${{ needs.set-docker-tags.outputs.tag_version }}"
+            echo "Debug: Building for dockerhub image = ${{ needs.set-docker-tags.outputs.dockerhub_image }}"
+            echo "Debug: Node.js version = ${{ env.NODEJS_VERSION }}"
+            echo "Debug: Working directory content:"
+            ls -la
+            echo "Debug: SATP plugin directory content:"
+            ls -la packages/cactus-plugin-satp-hermes/ || echo "Plugin directory not found"
+          }
+      - name: Download build output
+        uses: actions/download-artifact@v4
+        with:
+          name: satp-hermes-build-output
+          path: packages/cactus-plugin-satp-hermes/dist/
+      - name: Download .yarn cache
+        uses: actions/download-artifact@v4
+        with:
+          name: satp-hermes-yarn-cache
+          path: ./.yarn/
+      - name: Download node_modules
+        uses: actions/download-artifact@v4
+        with:
+          name: satp-hermes-node-modules
+          path: node_modules/
+      - name: Install dependencies
+        run: yarn install
+          
       - name: Use Node.js ${{ env.NODEJS_VERSION }}
         uses: actions/setup-node@v4.0.3
         with:
@@ -936,6 +920,23 @@ jobs:
             echo "Debug: SATP plugin directory content:"
             ls -la packages/cactus-plugin-satp-hermes/ || echo "Plugin directory not found"
           }
+      - name: Download build output
+        uses: actions/download-artifact@v4
+        with:
+          name: satp-hermes-build-output
+          path: packages/cactus-plugin-satp-hermes/dist/
+      - name: Download .yarn cache
+        uses: actions/download-artifact@v4
+        with:
+          name: satp-hermes-yarn-cache
+          path: ./.yarn/
+      - name: Download node_modules
+        uses: actions/download-artifact@v4
+        with:
+          name: satp-hermes-node-modules
+          path: node_modules/
+      - name: Install dependencies
+        run: yarn install
           
       - name: Use Node.js ${{ env.NODEJS_VERSION }}
         uses: actions/setup-node@v4.0.3
